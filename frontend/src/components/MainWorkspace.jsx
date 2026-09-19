@@ -1,17 +1,18 @@
-import React, { useState, useRef } from 'react';
-import { 
-  UploadCloud, 
-  Play, 
-  Save, 
-  Copy, 
-  Check, 
-  Volume2, 
-  Languages, 
-  Sparkles, 
-  Clock, 
-  FileAudio, 
+import React, { useState, useRef, useEffect } from 'react';
+import {
+  UploadCloud,
+  Play,
+  Save,
+  Copy,
+  Check,
+  Volume2,
+  Languages,
+  Sparkles,
+  Clock,
+  FileAudio,
   Loader2,
   Filter,
+  AlertCircle,
   CheckCircle2
 } from 'lucide-react';
 import axios from 'axios';
@@ -27,40 +28,42 @@ const LANG_CONFIG = {
 };
 
 function formatTimestamp(seconds) {
-  if (typeof seconds !== 'number') return '00:00';
+  if (typeof seconds !== 'number' || isNaN(seconds)) return '00:00';
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
   return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 }
 
-export default function MainWorkspace({ 
-  currentAudio, 
-  onAudioLoaded, 
+export default function MainWorkspace({
+  currentAudio,
+  onAudioLoaded,
   onSeekAudio,
   currentTime,
   onSaveCompleted
 }) {
   const [file, setFile] = useState(null);
   const [taskId, setTaskId] = useState(null);
-  const [taskStatus, setTaskStatus] = useState('idle'); // idle, uploading, processing, completed, failed
+  const [taskStatus, setTaskStatus] = useState('idle');
   const [progress, setProgress] = useState(0);
   const [statusMessage, setStatusMessage] = useState('');
   const [result, setResult] = useState(null);
-  
+  const [errorMsg, setErrorMsg] = useState('');
   const [selectedLangFilter, setSelectedLangFilter] = useState('all');
   const [copied, setCopied] = useState(false);
   const [isSaveModalOpen, setIsSaveModalOpen] = useState(false);
 
   const fileInputRef = useRef(null);
+  const pollingRef = useRef(null);
 
-  // Sync if currentAudio changes from DB file directory selection
-  React.useEffect(() => {
+  // Sync when a DB record is selected from the sidebar
+  useEffect(() => {
     if (currentAudio && currentAudio.isFromDb) {
       setFile(null);
       setTaskId(null);
       setTaskStatus('completed');
       setProgress(100);
       setStatusMessage('DB에서 불러온 기록');
+      setErrorMsg('');
       setResult({
         duration: currentAudio.duration,
         detected_languages: currentAudio.detected_languages || [],
@@ -70,105 +73,117 @@ export default function MainWorkspace({
     }
   }, [currentAudio]);
 
+  // Clean up polling on unmount
+  useEffect(() => () => stopPolling(), []);
+
+  const stopPolling = () => {
+    if (pollingRef.current) {
+      clearInterval(pollingRef.current);
+      pollingRef.current = null;
+    }
+  };
+
   const handleFileChange = (e) => {
     const selected = e.target.files[0];
-    if (selected) {
-      setFile(selected);
-      setTaskStatus('ready');
-      setProgress(0);
-      setStatusMessage(`선택된 파일: ${selected.name} (${(selected.size / (1024*1024)).toFixed(1)}MB)`);
-      setResult(null);
+    if (!selected) return;
+    stopPolling();
+    setFile(selected);
+    setTaskId(null);
+    setTaskStatus('ready');
+    setProgress(0);
+    setStatusMessage(`선택된 파일: ${selected.name} (${(selected.size / (1024 * 1024)).toFixed(1)} MB)`);
+    setResult(null);
+    setErrorMsg('');
 
-      // Local audio preview URL
-      const localUrl = URL.createObjectURL(selected);
-      onAudioLoaded({
-        url: localUrl,
-        filename: selected.name,
-        duration: 0,
-        isFromDb: false
-      });
+    const localUrl = URL.createObjectURL(selected);
+    onAudioLoaded({ url: localUrl, filename: selected.name, duration: 0, isFromDb: false });
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    const dropped = e.dataTransfer.files[0];
+    if (dropped) {
+      const fakeEvent = { target: { files: [dropped] } };
+      handleFileChange(fakeEvent);
     }
   };
 
   const startUploadAndStt = async () => {
     if (!file) return;
-
+    stopPolling();
+    setErrorMsg('');
     setTaskStatus('uploading');
-    setProgress(5);
-    setStatusMessage('오디오 파일 스트리밍 업로드 중 (1MB 청크)...');
+    setProgress(2);
+    setStatusMessage(`대용량 파일 업로드 중... (${(file.size / (1024 * 1024)).toFixed(1)} MB)`);
 
     const formData = new FormData();
     formData.append('file', file);
 
+    let newTaskId;
     try {
       const uploadRes = await axios.post('/api/upload', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
-        onUploadProgress: (progressEvent) => {
-          if (progressEvent.total) {
-            const percent = Math.round((progressEvent.loaded * 30) / progressEvent.total);
-            setProgress(percent);
+        onUploadProgress: (e) => {
+          if (e.total) {
+            const pct = Math.round((e.loaded / e.total) * 30);
+            setProgress(pct);
+            setStatusMessage(`파일 전송 중... ${(e.loaded / (1024 * 1024)).toFixed(1)} / ${(e.total / (1024 * 1024)).toFixed(1)} MB`);
           }
         }
       });
-
-      const newTaskId = uploadRes.data.task_id;
+      newTaskId = uploadRes.data.task_id;
       setTaskId(newTaskId);
+      onAudioLoaded({ url: uploadRes.data.audio_url, filename: uploadRes.data.filename, duration: 0, isFromDb: false });
 
-      // Update audio to backend URL
-      onAudioLoaded({
-        url: uploadRes.data.audio_url,
-        filename: uploadRes.data.filename,
-        duration: 0,
-        isFromDb: false
-      });
-
-      // Start STT process
       setTaskStatus('processing');
-      setStatusMessage('faster-whisper 모델 구동 및 VAD 구간 감지 시작...');
-      await axios.post(`/api/tasks/${newTaskId}/start`);
+      setProgress(32);
+      setStatusMessage('STT 변환 엔진 시작 중...');
 
-      // Poll status
-      pollTaskStatus(newTaskId);
+      await axios.post(`/api/tasks/${newTaskId}/start`);
+      startPolling(newTaskId);
     } catch (err) {
       setTaskStatus('failed');
-      setStatusMessage(err.response?.data?.detail || '업로드 및 STT 요청에 실패했습니다.');
+      setErrorMsg(err.response?.data?.detail || '업로드 중 오류가 발생했습니다.');
+      setStatusMessage('');
     }
   };
 
-  const pollTaskStatus = (tId) => {
-    const interval = setInterval(async () => {
+  const startPolling = (tId) => {
+    // Poll every 2s — no limit; stops automatically on completed/failed
+    pollingRef.current = setInterval(async () => {
       try {
         const res = await axios.get(`/api/tasks/${tId}`);
         const data = res.data;
 
         if (data.status === 'processing') {
-          setProgress(Math.max(30, Math.round(data.progress || 35)));
+          const pct = Math.max(32, Math.round(data.progress || 32));
+          setProgress(pct);
           setStatusMessage(data.message || '다국어 음성 인식 분석 중...');
         } else if (data.status === 'completed') {
-          clearInterval(interval);
+          stopPolling();
           setTaskStatus('completed');
           setProgress(100);
-          setStatusMessage('음성 인식이 성공적으로 완료되었습니다!');
+          setStatusMessage(`✅ 완료! 총 ${data.result?.segments?.length || 0}개 구간 인식`);
           setResult(data.result);
         } else if (data.status === 'failed') {
-          clearInterval(interval);
+          stopPolling();
           setTaskStatus('failed');
-          setStatusMessage(data.message || 'STT 처리에 실패했습니다.');
+          setErrorMsg(data.message || 'STT 처리에 실패했습니다.');
+          setStatusMessage('');
         }
       } catch (err) {
-        clearInterval(interval);
-        setTaskStatus('failed');
-        setStatusMessage('작업 상태 조회 실패');
+        // Network hiccup — keep polling
+        console.warn('Polling error (will retry):', err.message);
       }
-    }, 1500);
+    }, 2000);
   };
 
   const copyToClipboard = () => {
     if (!result) return;
-    const textToCopy = result.segments
+    const text = result.segments
       ? result.segments.map(s => `[${formatTimestamp(s.start)} -> ${formatTimestamp(s.end)}] [${s.language}] ${s.text}`).join('\n')
       : result.full_text;
-    navigator.clipboard.writeText(textToCopy);
+    navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -176,16 +191,22 @@ export default function MainWorkspace({
   const segments = result?.segments || [];
   const filteredSegments = selectedLangFilter === 'all'
     ? segments
-    : segments.filter(s => s.language?.toLowerCase() === selectedLangFilter.toLowerCase());
-
+    : segments.filter(s => (s.language || '').toLowerCase() === selectedLangFilter);
   const detectedLanguages = result?.detected_languages || [];
 
+  const isWorking = taskStatus === 'uploading' || taskStatus === 'processing';
+
   return (
-    <div className="h-full flex flex-col bg-white border border-slate-200/80 rounded-2xl shadow-sm overflow-hidden">
-      {/* Top Action & Control Bar */}
+    <div
+      className="h-full flex flex-col bg-white border border-slate-200/80 rounded-2xl shadow-sm overflow-hidden"
+      onDrop={handleDrop}
+      onDragOver={(e) => e.preventDefault()}
+    >
+      {/* ── Control Bar ─────────────────────────────────────────────── */}
       <div className="p-4 border-b border-slate-100 bg-gradient-to-b from-slate-50/60 to-white">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          {/* File Upload Trigger */}
+
+          {/* File picker */}
           <div className="flex items-center gap-2">
             <input
               type="file"
@@ -196,48 +217,37 @@ export default function MainWorkspace({
             />
             <button
               onClick={() => fileInputRef.current?.click()}
-              className="px-4 py-2 bg-slate-100 hover:bg-slate-200/80 active:bg-slate-300 text-slate-700 text-xs font-bold rounded-xl transition-all flex items-center gap-2 border border-slate-200"
+              className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl border border-slate-200 flex items-center gap-2 transition-all"
             >
               <UploadCloud className="w-4 h-4 text-blue-600" />
-              <span>오디오 파일 선택</span>
+              오디오 파일 선택
             </button>
-
-            {/* File info pill */}
             {file && (
-              <div className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 border border-blue-200 rounded-xl text-xs font-semibold text-blue-800">
-                <FileAudio className="w-3.5 h-3.5 text-blue-600" />
-                <span className="max-w-[160px] md:max-w-[240px] truncate">{file.name}</span>
-              </div>
+              <span className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 border border-blue-200 rounded-xl text-xs font-semibold text-blue-800 max-w-[220px] truncate">
+                <FileAudio className="w-3.5 h-3.5 flex-shrink-0 text-blue-600" />
+                {file.name}
+              </span>
             )}
           </div>
 
-          {/* Action Buttons: 작동 (STT 시작) & 저장 */}
+          {/* Action buttons */}
           <div className="flex items-center gap-2">
             <button
               onClick={startUploadAndStt}
-              disabled={!file || taskStatus === 'uploading' || taskStatus === 'processing'}
-              className="px-5 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 active:from-blue-800 active:to-indigo-800 text-white text-xs font-bold rounded-xl shadow-md shadow-blue-500/20 transition-all flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+              disabled={!file || isWorking}
+              className="px-5 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white text-xs font-bold rounded-xl shadow-md shadow-blue-500/20 transition-all flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              {taskStatus === 'uploading' || taskStatus === 'processing' ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  <span>인식 진행 중...</span>
-                </>
-              ) : (
-                <>
-                  <Play className="w-4 h-4 fill-white" />
-                  <span>작동 (STT 시작)</span>
-                </>
-              )}
+              {isWorking
+                ? <><Loader2 className="w-4 h-4 animate-spin" /><span>인식 진행 중...</span></>
+                : <><Play className="w-4 h-4 fill-white" /><span>작동 (STT 시작)</span></>}
             </button>
 
             <button
               onClick={() => setIsSaveModalOpen(true)}
               disabled={!result}
-              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white text-xs font-bold rounded-xl shadow-md shadow-emerald-500/20 transition-all flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl shadow-md shadow-emerald-500/20 transition-all flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              <Save className="w-4 h-4" />
-              <span>저장</span>
+              <Save className="w-4 h-4" /><span>저장</span>
             </button>
 
             <button
@@ -251,40 +261,54 @@ export default function MainWorkspace({
           </div>
         </div>
 
-        {/* Progress bar and Status Banner */}
-        {(taskStatus === 'uploading' || taskStatus === 'processing') && (
+        {/* Progress bar */}
+        {isWorking && (
           <div className="mt-3 pt-3 border-t border-slate-100">
             <div className="flex items-center justify-between text-xs font-semibold text-slate-700 mb-1.5">
-              <span className="flex items-center gap-1.5">
-                <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-600" />
+              <span className="flex items-center gap-1.5 truncate max-w-[80%]">
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-600 flex-shrink-0" />
                 {statusMessage}
               </span>
-              <span className="font-mono text-blue-600">{progress}%</span>
+              <span className="font-mono text-blue-600 ml-2">{progress}%</span>
             </div>
             <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden border border-slate-200/60">
-              <div 
-                className="bg-gradient-to-r from-blue-500 to-indigo-600 h-2 rounded-full transition-all duration-300"
+              <div
+                className="bg-gradient-to-r from-blue-500 to-indigo-600 h-2 rounded-full transition-all duration-500"
                 style={{ width: `${progress}%` }}
               />
             </div>
+            <p className="text-[11px] text-slate-400 mt-1 text-center font-medium">
+              ⏳ 150MB 파일 기준 약 5~15분 소요됩니다. 페이지를 닫지 마세요.
+            </p>
+          </div>
+        )}
+
+        {/* Status messages */}
+        {taskStatus === 'completed' && !isWorking && (
+          <div className="mt-2 flex items-center gap-2 text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-xl">
+            <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
+            {statusMessage}
+          </div>
+        )}
+
+        {errorMsg && (
+          <div className="mt-2 flex items-center gap-2 text-xs font-semibold text-red-700 bg-red-50 border border-red-200 px-3 py-1.5 rounded-xl">
+            <AlertCircle className="w-4 h-4 flex-shrink-0" />
+            {errorMsg}
           </div>
         )}
       </div>
 
-      {/* Language Filter & Meta Bar */}
+      {/* ── Language Filter Bar ─────────────────────────────────────── */}
       {result && (
-        <div className="px-4 py-2 bg-slate-50/70 border-b border-slate-100 flex items-center justify-between flex-wrap gap-2 text-xs">
+        <div className="px-4 py-2 bg-slate-50/70 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs">
           <div className="flex items-center gap-1.5 flex-wrap">
             <span className="text-slate-400 font-bold flex items-center gap-1 mr-1">
               <Filter className="w-3 h-3" /> 언어 필터:
             </span>
             <button
               onClick={() => setSelectedLangFilter('all')}
-              className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
-                selectedLangFilter === 'all'
-                  ? 'bg-blue-600 text-white shadow-sm'
-                  : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
-              }`}
+              className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${selectedLangFilter === 'all' ? 'bg-blue-600 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'}`}
             >
               전체 ({segments.length})
             </button>
@@ -292,25 +316,20 @@ export default function MainWorkspace({
               <button
                 key={l}
                 onClick={() => setSelectedLangFilter(l)}
-                className={`px-2.5 py-1 rounded-lg text-xs font-bold uppercase transition-all ${
-                  selectedLangFilter.toLowerCase() === l.toLowerCase()
-                    ? 'bg-blue-600 text-white shadow-sm'
-                    : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
-                }`}
+                className={`px-2.5 py-1 rounded-lg text-xs font-bold uppercase transition-all ${selectedLangFilter === l ? 'bg-blue-600 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'}`}
               >
-                {l} ({segments.filter(s => s.language?.toLowerCase() === l.toLowerCase()).length})
+                {l} ({segments.filter(s => (s.language || '').toLowerCase() === l).length})
               </button>
             ))}
           </div>
-
-          <div className="text-slate-400 font-medium">
-            총 {result.duration ? `${formatTimestamp(result.duration)}` : ''} · 구간 {filteredSegments.length}개
-          </div>
+          <span className="text-slate-400 font-medium">
+            {result.duration ? formatTimestamp(result.duration) : ''} · {filteredSegments.length}개 구간
+          </span>
         </div>
       )}
 
-      {/* Text Area (Main Transcript visualization) */}
-      <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-3 bg-slate-50/30">
+      {/* ── Transcript Area ─────────────────────────────────────────── */}
+      <div className="flex-1 overflow-y-auto p-4 md:p-5 space-y-2.5 bg-slate-50/30">
         {!result ? (
           <div className="h-full flex flex-col items-center justify-center text-center p-8">
             <div className="w-16 h-16 bg-blue-50 border border-blue-100 rounded-3xl flex items-center justify-center text-blue-600 mb-4 shadow-sm">
@@ -320,67 +339,53 @@ export default function MainWorkspace({
             <p className="text-xs text-slate-500 max-w-sm leading-relaxed mb-4">
               MP3 또는 M4A 오디오 파일을 업로드하고 <strong>[작동]</strong> 버튼을 누르면 구간별 다국어 인식 결과가 타임스탬프와 함께 시각화됩니다.
             </p>
-            <div className="flex items-center gap-2 text-[11px] text-slate-400">
-              <span className="w-2 h-2 rounded-full bg-blue-500"></span> 한국어
-              <span className="w-2 h-2 rounded-full bg-emerald-500"></span> 영어
-              <span className="w-2 h-2 rounded-full bg-orange-500"></span> 스페인어
-              <span className="w-2 h-2 rounded-full bg-red-500"></span> 중국어
-              <span className="w-2 h-2 rounded-full bg-purple-500"></span> 일본어
-              <span className="w-2 h-2 rounded-full bg-pink-500"></span> 포르투갈어
+            <div className="flex items-center gap-3 text-[11px] text-slate-400 flex-wrap justify-center">
+              {Object.entries(LANG_CONFIG).map(([code, cfg]) => (
+                <span key={code} className="flex items-center gap-1">
+                  <span className={`w-2 h-2 rounded-full ${cfg.color.split(' ')[0]}`}></span>
+                  {cfg.name}
+                </span>
+              ))}
             </div>
+          </div>
+        ) : filteredSegments.length === 0 ? (
+          <div className="text-center py-12 text-slate-400 text-sm">
+            선택된 언어로 인식된 구간이 없습니다.
           </div>
         ) : (
           filteredSegments.map((seg, idx) => {
-            const isCurrentlyPlaying = currentTime >= seg.start && currentTime <= seg.end;
+            const isActive = currentTime >= seg.start && currentTime <= seg.end;
             const langCode = (seg.language || 'unk').toLowerCase();
-            const langStyle = LANG_CONFIG[langCode] || { 
-              name: langCode.toUpperCase(), 
-              color: 'bg-slate-100 text-slate-800 border-slate-200' 
-            };
+            const langCfg = LANG_CONFIG[langCode] || { name: langCode.toUpperCase(), color: 'bg-slate-100 text-slate-800 border-slate-200' };
 
             return (
               <div
                 key={idx}
                 onClick={() => onSeekAudio(seg.start)}
                 className={`p-3.5 rounded-xl border transition-all cursor-pointer ${
-                  isCurrentlyPlaying
-                    ? 'bg-blue-50/90 border-blue-500 ring-2 ring-blue-400/30 shadow-md'
-                    : 'bg-white hover:bg-slate-50/80 border-slate-200/80 hover:border-slate-300 shadow-sm'
+                  isActive
+                    ? 'bg-blue-50/90 border-blue-400 ring-2 ring-blue-400/30 shadow-md'
+                    : 'bg-white hover:bg-slate-50 border-slate-200/80 hover:border-slate-300 shadow-sm'
                 }`}
               >
-                <div className="flex items-center justify-between gap-3 mb-1.5">
-                  <div className="flex items-center gap-2">
-                    {/* Clickable timestamp */}
-                    <button
-                      className="font-mono text-xs font-bold text-blue-700 hover:underline flex items-center gap-1 bg-blue-50 px-2 py-0.5 rounded border border-blue-100"
-                      title="이 구간부터 오디오 재생"
-                    >
-                      <Clock className="w-3 h-3" />
-                      [{formatTimestamp(seg.start)} &rarr; {formatTimestamp(seg.end)}]
-                    </button>
-
-                    {/* Language Badge */}
-                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border uppercase ${langStyle.color}`}>
-                      {seg.language} ({langStyle.name})
-                    </span>
-
-                    {/* Probability */}
-                    <span className="text-[10px] text-slate-400 font-medium">
-                      신뢰도 {(seg.probability * 100).toFixed(0)}%
-                    </span>
-                  </div>
-
-                  {isCurrentlyPlaying && (
-                    <span className="flex items-center gap-1 text-[11px] font-bold text-blue-600 animate-pulse">
+                <div className="flex items-center flex-wrap gap-2 mb-1.5">
+                  <span className="font-mono text-xs font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-100 flex items-center gap-1">
+                    <Clock className="w-3 h-3" />
+                    [{formatTimestamp(seg.start)} → {formatTimestamp(seg.end)}]
+                  </span>
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border uppercase ${langCfg.color}`}>
+                    {seg.language} ({langCfg.name})
+                  </span>
+                  <span className="text-[10px] text-slate-400 font-medium">
+                    신뢰도 {((seg.probability || 0) * 100).toFixed(0)}%
+                  </span>
+                  {isActive && (
+                    <span className="ml-auto flex items-center gap-1 text-[11px] font-bold text-blue-600 animate-pulse">
                       <Volume2 className="w-3.5 h-3.5" /> 재생 중
                     </span>
                   )}
                 </div>
-
-                {/* Segment Text */}
-                <p className="text-sm font-medium text-slate-800 leading-relaxed pl-1">
-                  {seg.text}
-                </p>
+                <p className="text-sm font-medium text-slate-800 leading-relaxed pl-1">{seg.text}</p>
               </div>
             );
           })
@@ -392,10 +397,8 @@ export default function MainWorkspace({
         isOpen={isSaveModalOpen}
         onClose={() => setIsSaveModalOpen(false)}
         taskId={taskId}
-        filename={file ? file.name : currentAudio?.filename || 'stt_transcript'}
-        onSaveCompleted={(data) => {
-          onSaveCompleted(data);
-        }}
+        filename={file?.name || currentAudio?.filename || 'stt_transcript'}
+        onSaveCompleted={(data) => { onSaveCompleted(data); }}
       />
     </div>
   );
