@@ -7,7 +7,7 @@ from typing import Optional, List
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, Header, Query
+from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
@@ -29,7 +29,6 @@ except (ImportError, ValueError):
 logger = logging.getLogger("api")
 logging.basicConfig(level=logging.INFO)
 
-# Use a dedicated thread pool for CPU-bound STT work (keeps asyncio loop free)
 _thread_pool = ThreadPoolExecutor(max_workers=2)
 _tasks_lock = threading.Lock()
 
@@ -49,8 +48,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory task store: { task_id -> dict }
 tasks_db = {}
+# upload_sessions: { upload_id -> {filename, total_size, total_chunks, received_chunks, temp_path} }
+upload_sessions = {}
 
 
 class LoginRequest(BaseModel):
@@ -65,6 +65,12 @@ class SaveRequest(BaseModel):
     filename: Optional[str] = None
 
 
+class ChunkInitRequest(BaseModel):
+    filename: str
+    total_size: int
+    total_chunks: int
+
+
 def verify_admin(authorization: Optional[str] = Header(None)):
     if not authorization:
         raise HTTPException(status_code=401, detail="인증 헤더가 누락되었습니다.")
@@ -74,7 +80,6 @@ def verify_admin(authorization: Optional[str] = Header(None)):
     return True
 
 
-# ── STT worker (runs in thread pool, never blocks event loop) ─────────────────
 def _stt_worker(task_id: str, audio_path: str):
     def progress(pct: float, msg: str):
         with _tasks_lock:
@@ -125,16 +130,111 @@ def get_me(_: bool = Depends(verify_admin)):
     return {"authenticated": True, "username": "admin", "role": "admin"}
 
 
+# ── 1MB Chunked Streaming Upload for 150MB+ Files (Bypasses Vercel 4.5MB Limit) ─
+
+@app.post("/api/upload/init")
+def upload_init(req: ChunkInitRequest):
+    upload_id = str(uuid.uuid4())
+    safe_name = req.filename or f"audio_{upload_id}.mp3"
+    ext = Path(safe_name).suffix or ".mp3"
+    temp_path = UPLOAD_DIR / f"{upload_id}{ext}"
+
+    # Ensure empty file exists
+    with open(temp_path, "wb") as f:
+        pass
+
+    with _tasks_lock:
+        upload_sessions[upload_id] = {
+            "upload_id": upload_id,
+            "filename": safe_name,
+            "total_size": req.total_size,
+            "total_chunks": req.total_chunks,
+            "received_chunks": set(),
+            "temp_path": str(temp_path),
+            "created_at": datetime.utcnow().isoformat()
+        }
+
+    return {"upload_id": upload_id, "message": "청크 업로드 세션 초기화 완료"}
+
+
+@app.post("/api/upload/chunk")
+async def upload_chunk(
+    upload_id: str = Form(...),
+    chunk_index: int = Form(...),
+    chunk: UploadFile = File(...)
+):
+    with _tasks_lock:
+        session = upload_sessions.get(upload_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="업로드 세션을 찾을 수 없습니다.")
+
+    temp_path = session["temp_path"]
+    chunk_bytes = await chunk.read()
+    chunk_size = 1024 * 1024  # 1MB standard chunk size
+
+    # Write chunk at exact offset
+    with open(temp_path, "r+b") as f:
+        f.seek(chunk_index * chunk_size)
+        f.write(chunk_bytes)
+
+    with _tasks_lock:
+        session["received_chunks"].add(chunk_index)
+        received_count = len(session["received_chunks"])
+        is_complete = (received_count >= session["total_chunks"])
+
+    return {
+        "upload_id": upload_id,
+        "chunk_index": chunk_index,
+        "received_chunks": received_count,
+        "total_chunks": session["total_chunks"],
+        "is_complete": is_complete
+    }
+
+
+@app.post("/api/upload/complete")
+def upload_complete(upload_id: str = Form(...)):
+    with _tasks_lock:
+        session = upload_sessions.pop(upload_id, None)
+    if not session:
+        raise HTTPException(status_code=404, detail="완료할 업로드 세션이 없습니다.")
+
+    temp_path = session["temp_path"]
+    file_size = os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
+
+    task_id = session["upload_id"]
+    with _tasks_lock:
+        tasks_db[task_id] = {
+            "task_id": task_id,
+            "filename": session["filename"],
+            "file_path": temp_path,
+            "file_size": file_size,
+            "status": "uploaded",
+            "progress": 0.0,
+            "message": "파일 업로드 완료. 작동 대기 중",
+            "result": None,
+            "audio_url": f"/api/audio/{task_id}",
+            "created_at": datetime.utcnow().isoformat()
+        }
+
+    return {
+        "task_id": task_id,
+        "filename": session["filename"],
+        "file_size": file_size,
+        "audio_url": f"/api/audio/{task_id}",
+        "message": "청크 병합 및 업로드 완료"
+    }
+
+
+# Fallback single-file upload for small files
 @app.post("/api/upload")
 async def upload_audio(file: UploadFile = File(...)):
-    """Stream-write uploaded audio in 1 MB chunks to disk."""
     task_id = str(uuid.uuid4())
     safe_name = file.filename or f"audio_{task_id}.mp3"
     ext = Path(safe_name).suffix or ".mp3"
     file_path = UPLOAD_DIR / f"{task_id}{ext}"
 
     total = 0
-    CHUNK = 1 * 1024 * 1024  # 1 MB
+    CHUNK = 1 * 1024 * 1024
     with open(file_path, "wb") as fp:
         while True:
             chunk = await file.read(CHUNK)
@@ -151,13 +251,12 @@ async def upload_audio(file: UploadFile = File(...)):
             "file_size": total,
             "status": "uploaded",
             "progress": 0.0,
-            "message": "업로드 완료. [작동] 버튼을 눌러 STT를 시작하세요.",
+            "message": "파일 업로드 완료. 작동 대기 중",
             "result": None,
             "audio_url": f"/api/audio/{task_id}",
             "created_at": datetime.utcnow().isoformat(),
         }
 
-    logger.info("Uploaded %s → %s (%.1f MB)", safe_name, file_path, total / 1_048_576)
     return {
         "task_id": task_id,
         "filename": safe_name,
@@ -176,10 +275,9 @@ def start_stt(task_id: str):
         if info["status"] == "processing":
             return {"message": "이미 진행 중입니다.", "task_id": task_id}
         info["status"] = "processing"
-        info["message"] = "STT 준비 중 (모델 로딩)..."
+        info["message"] = "STT 준비 중 (faster-whisper 모델 로딩)..."
         audio_path = info["file_path"]
 
-    # Submit to thread pool — event loop stays responsive
     _thread_pool.submit(_stt_worker, task_id, audio_path)
     return {"message": "STT 작업이 시작되었습니다.", "task_id": task_id}
 
@@ -189,7 +287,7 @@ def get_task_status(task_id: str):
     with _tasks_lock:
         if task_id not in tasks_db:
             raise HTTPException(status_code=404, detail="작업을 찾을 수 없습니다.")
-        return dict(tasks_db[task_id])  # return a copy
+        return dict(tasks_db[task_id])
 
 
 @app.get("/api/audio/{identifier}")

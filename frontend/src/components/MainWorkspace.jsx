@@ -55,7 +55,6 @@ export default function MainWorkspace({
   const fileInputRef = useRef(null);
   const pollingRef = useRef(null);
 
-  // Sync when a DB record is selected from the sidebar
   useEffect(() => {
     if (currentAudio && currentAudio.isFromDb) {
       setFile(null);
@@ -73,7 +72,6 @@ export default function MainWorkspace({
     }
   }, [currentAudio]);
 
-  // Clean up polling on unmount
   useEffect(() => () => stopPolling(), []);
 
   const stopPolling = () => {
@@ -108,55 +106,92 @@ export default function MainWorkspace({
     }
   };
 
+  // ── 1MB Chunked Streaming Upload (150MB+ Safe) ───────────────────
   const startUploadAndStt = async () => {
     if (!file) return;
     stopPolling();
     setErrorMsg('');
     setTaskStatus('uploading');
-    setProgress(2);
-    setStatusMessage(`대용량 파일 업로드 중... (${(file.size / (1024 * 1024)).toFixed(1)} MB)`);
+    setProgress(1);
 
-    const formData = new FormData();
-    formData.append('file', file);
+    const CHUNK_SIZE = 1 * 1024 * 1024; // 1 MB chunk
+    const totalSize = file.size;
+    const totalChunks = Math.ceil(totalSize / CHUNK_SIZE);
+    const totalMbStr = (totalSize / (1024 * 1024)).toFixed(1);
 
-    let newTaskId;
+    setStatusMessage(`대용량 청크 전송 초기화 중... (총 ${totalMbStr} MB / ${totalChunks}개 청크)`);
+
+    let finalTaskId = null;
+
     try {
-      const uploadRes = await axios.post('/api/upload', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-        onUploadProgress: (e) => {
-          if (e.total) {
-            const pct = Math.round((e.loaded / e.total) * 30);
-            setProgress(pct);
-            setStatusMessage(`파일 전송 중... ${(e.loaded / (1024 * 1024)).toFixed(1)} / ${(e.total / (1024 * 1024)).toFixed(1)} MB`);
-          }
-        }
+      // 1. Initialize chunked upload session
+      const initRes = await axios.post('/api/upload/init', {
+        filename: file.name,
+        total_size: totalSize,
+        total_chunks: totalChunks
       });
-      newTaskId = uploadRes.data.task_id;
-      setTaskId(newTaskId);
-      onAudioLoaded({ url: uploadRes.data.audio_url, filename: uploadRes.data.filename, duration: 0, isFromDb: false });
+      const uploadId = initRes.data.upload_id;
 
+      // 2. Upload chunks in loop (1MB each, completely bypasses Vercel 4.5MB payload limit)
+      for (let i = 0; i < totalChunks; i++) {
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(totalSize, start + CHUNK_SIZE);
+        const chunkBlob = file.slice(start, end);
+
+        const chunkFormData = new FormData();
+        chunkFormData.append('upload_id', uploadId);
+        chunkFormData.append('chunk_index', i);
+        chunkFormData.append('chunk', chunkBlob, `${file.name}.part${i}`);
+
+        await axios.post('/api/upload/chunk', chunkFormData, {
+          headers: { 'Content-Type': 'multipart/form-data' }
+        });
+
+        const uploadedMb = ((end) / (1024 * 1024)).toFixed(1);
+        const uploadPercent = Math.round(((i + 1) / totalChunks) * 35); // 0% ~ 35% for upload
+        setProgress(uploadPercent);
+        setStatusMessage(`1MB 청크 스트리밍 전송 중... [${uploadedMb} MB / ${totalMbStr} MB] (${i + 1}/${totalChunks})`);
+      }
+
+      // 3. Complete chunked upload and merge
+      setStatusMessage('오디오 청크 결합 및 검증 중...');
+      const completeFormData = new FormData();
+      completeFormData.append('upload_id', uploadId);
+      const completeRes = await axios.post('/api/upload/complete', completeFormData);
+
+      finalTaskId = completeRes.data.task_id;
+      setTaskId(finalTaskId);
+      onAudioLoaded({
+        url: completeRes.data.audio_url,
+        filename: completeRes.data.filename,
+        duration: 0,
+        isFromDb: false
+      });
+
+      // 4. Trigger STT processing
       setTaskStatus('processing');
-      setProgress(32);
-      setStatusMessage('STT 변환 엔진 시작 중...');
+      setProgress(38);
+      setStatusMessage('faster-whisper 모델 구동 및 VAD 음성 구간 분석 시작...');
 
-      await axios.post(`/api/tasks/${newTaskId}/start`);
-      startPolling(newTaskId);
+      await axios.post(`/api/tasks/${finalTaskId}/start`);
+      startPolling(finalTaskId);
+
     } catch (err) {
       setTaskStatus('failed');
-      setErrorMsg(err.response?.data?.detail || '업로드 중 오류가 발생했습니다.');
+      const errDetail = err.response?.data?.detail || err.message || '업로드 중 오류가 발생했습니다.';
+      setErrorMsg(`업로드 오류: ${errDetail}`);
       setStatusMessage('');
     }
   };
 
   const startPolling = (tId) => {
-    // Poll every 2s — no limit; stops automatically on completed/failed
     pollingRef.current = setInterval(async () => {
       try {
         const res = await axios.get(`/api/tasks/${tId}`);
         const data = res.data;
 
         if (data.status === 'processing') {
-          const pct = Math.max(32, Math.round(data.progress || 32));
+          const pct = Math.max(38, Math.round(data.progress || 38));
           setProgress(pct);
           setStatusMessage(data.message || '다국어 음성 인식 분석 중...');
         } else if (data.status === 'completed') {
@@ -172,7 +207,6 @@ export default function MainWorkspace({
           setStatusMessage('');
         }
       } catch (err) {
-        // Network hiccup — keep polling
         console.warn('Polling error (will retry):', err.message);
       }
     }, 2000);
@@ -223,7 +257,7 @@ export default function MainWorkspace({
               오디오 파일 선택
             </button>
             {file && (
-              <span className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 border border-blue-200 rounded-xl text-xs font-semibold text-blue-800 max-w-[220px] truncate">
+              <span className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 border border-blue-200 rounded-xl text-xs font-semibold text-blue-800 max-w-[240px] truncate">
                 <FileAudio className="w-3.5 h-3.5 flex-shrink-0 text-blue-600" />
                 {file.name}
               </span>
@@ -273,12 +307,12 @@ export default function MainWorkspace({
             </div>
             <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden border border-slate-200/60">
               <div
-                className="bg-gradient-to-r from-blue-500 to-indigo-600 h-2 rounded-full transition-all duration-500"
+                className="bg-gradient-to-r from-blue-500 to-indigo-600 h-2 rounded-full transition-all duration-300"
                 style={{ width: `${progress}%` }}
               />
             </div>
             <p className="text-[11px] text-slate-400 mt-1 text-center font-medium">
-              ⏳ 150MB 파일 기준 약 5~15분 소요됩니다. 페이지를 닫지 마세요.
+              ⚡ 1MB 청크 스트리밍 방식으로 대용량 오디오(150MB+)를 메모리 과부하 없이 안정적으로 전송합니다.
             </p>
           </div>
         )}
