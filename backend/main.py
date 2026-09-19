@@ -86,11 +86,13 @@ def _neon_db_stt_worker(task_id: str, audio_id: int):
     db: Session = SessionLocal()
     temp_path = None
     try:
-        def update_progress(pct: float, msg: str):
+        def update_progress(pct: float, msg: str, live_segs=None):
             with _tasks_lock:
                 if task_id in tasks_db:
                     tasks_db[task_id]["progress"] = pct
                     tasks_db[task_id]["message"] = msg
+                    if live_segs is not None:
+                        tasks_db[task_id]["live_segments"] = live_segs
 
         with _tasks_lock:
             tasks_db[task_id]["status"] = "processing"

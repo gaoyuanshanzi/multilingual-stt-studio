@@ -218,6 +218,14 @@ export default function MainWorkspace({
           const pct = Math.max(35, Math.round(data.progress || 35));
           setProgress(pct);
           setStatusMessage(data.message || 'Neon DB 오디오 기반 다국어 STT 변환 중...');
+          if (data.live_segments && data.live_segments.length > 0) {
+            setResult(prev => ({
+              duration: data.live_segments[data.live_segments.length - 1]?.end || 0,
+              detected_languages: Array.from(new Set(data.live_segments.map(s => s.language).filter(Boolean))),
+              segments: data.live_segments,
+              full_text: data.live_segments.map(s => s.text).join('\n')
+            }));
+          }
         } else if (data.status === 'completed') {
           stopPolling();
           setTaskStatus('completed');
