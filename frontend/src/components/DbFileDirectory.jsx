@@ -77,17 +77,27 @@ export default function DbFileDirectory({
   // 오디오 파일 Neon DB에서 완전 삭제 (150MB 용량 회수)
   const handleDeleteAudio = async (e, fileItem) => {
     e.stopPropagation();
+    if (actionId === `delete_audio_${fileItem.id}`) return; // 중복 클릭 차단
+
     const sizeStr = formatSize(fileItem.file_size);
     if (!window.confirm(`정말 "${fileItem.filename}" 오디오 파일을 Neon DB에서 완전 삭제하시겠습니까?\n(약 ${sizeStr}의 DB 저장 공간이 즉시 확보됩니다.)`)) {
       return;
     }
+
     setActionId(`delete_audio_${fileItem.id}`);
     try {
       const res = await axios.delete(`/api/db/audio/${fileItem.id}`);
       alert(res.data.message || '오디오 파일이 Neon DB에서 완전 삭제되었습니다.');
       setFiles(prev => prev.filter(f => !(f.type === 'audio' && f.id === fileItem.id)));
     } catch (err) {
-      alert('오디오 삭제 중 오류가 발생했습니다.');
+      if (err.response?.status === 404) {
+        // 이미 삭제된 경우에도 목록에서 자연스럽게 제거
+        alert('이미 Neon DB에서 삭제된 파일입니다.');
+        setFiles(prev => prev.filter(f => !(f.type === 'audio' && f.id === fileItem.id)));
+      } else {
+        const msg = err.response?.data?.detail || err.message || '오디오 삭제 중 오류가 발생했습니다.';
+        alert(`오디오 삭제 중 오류가 발생했습니다: ${msg}`);
+      }
     } finally {
       setActionId(null);
     }
@@ -329,11 +339,12 @@ export default function DbFileDirectory({
                       {/* 오디오 완전 삭제 버튼 (DB 용량 회수) */}
                       <button
                         onClick={(e) => handleDeleteAudio(e, item)}
-                        className="px-2 py-0.8 bg-red-50 hover:bg-red-100 text-red-600 hover:text-red-700 font-bold rounded-lg text-[10px] flex items-center gap-1 border border-red-200 transition-all"
+                        disabled={actionId === `delete_audio_${item.id}`}
+                        className="px-2 py-0.8 bg-red-50 hover:bg-red-100 text-red-600 hover:text-red-700 font-bold rounded-lg text-[10px] flex items-center gap-1 border border-red-200 transition-all disabled:opacity-50"
                         title="Neon DB에서 오디오를 완전 삭제하여 저장 공간을 비웁니다."
                       >
-                        <Trash2 className="w-3 h-3" />
-                        <span>오디오 완전삭제 (용량 확보)</span>
+                        <Trash2 className={`w-3 h-3 ${actionId === `delete_audio_${item.id}` ? 'animate-spin' : ''}`} />
+                        <span>{actionId === `delete_audio_${item.id}` ? '삭제 중...' : '오디오 완전삭제 (용량 확보)'}</span>
                       </button>
                     </>
                   ) : (

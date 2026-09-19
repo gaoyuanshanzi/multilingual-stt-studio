@@ -426,16 +426,28 @@ def export_db_document(doc_id: int, format: str = Query("txt"), db: Session = De
 
 @app.delete("/api/db/audio/{audio_id}")
 def delete_db_audio_file(audio_id: int, db: Session = Depends(get_db)):
-    """오디오 파일 및 1MB 청크들을 Neon DB에서 완전 삭제하여 DB 용량 확보!"""
+    """오디오 파일 및 1MB 청크들을 Neon DB에서 완전 삭제하여 DB 용량 확보 (고속 벌크 삭제 & 멱등성 보장)"""
     audio_file = db.query(DBAudioFile).filter(DBAudioFile.id == audio_id).first()
     if not audio_file:
-        raise HTTPException(status_code=404, detail="삭제할 오디오 파일을 찾을 수 없습니다.")
+        return {
+            "success": True,
+            "message": "이미 Neon DB에서 삭제된 파일입니다."
+        }
 
     size_mb = (audio_file.file_size or 0) / (1024 * 1024)
     filename = audio_file.filename
 
-    # Delete all audio chunks and the audio record (Cascade)
-    db.delete(audio_file)
+    # 1. 청크 일괄 직접 삭제 (메모리 로드 없이 SQL 엔진 레벨에서 고속 삭제)
+    db.query(DBAudioChunk).filter(DBAudioChunk.audio_file_id == audio_id).delete(synchronize_session=False)
+
+    # 2. STT 문서의 audio_file_id 참조를 None으로 해제 (STT 문서는 영구 보존!)
+    db.query(DBSTTDocument).filter(DBSTTDocument.audio_file_id == audio_id).update(
+        {DBSTTDocument.audio_file_id: None},
+        synchronize_session=False
+    )
+
+    # 3. 오디오 파일 레코드 삭제
+    db.query(DBAudioFile).filter(DBAudioFile.id == audio_id).delete(synchronize_session=False)
     db.commit()
 
     logger.info("Deleted audio file %d (%s, %.1f MB) from Neon DB.", audio_id, filename, size_mb)
