@@ -10,12 +10,14 @@ import {
   Loader2, 
   Sparkles,
   FileAudio,
-  Database
+  Database,
+  ExternalLink,
+  Laptop
 } from 'lucide-react';
 import axios from 'axios';
 
 export default function M4aConverterModal({ isOpen, onClose, onConversionSuccess }) {
-  const [activeTab, setActiveTab] = useState('local'); // 'local' or 'db'
+  const [activeTab, setActiveTab] = useState('local');
   const [selectedFile, setSelectedFile] = useState(null);
   const [converting, setConverting] = useState(false);
   const [downloadUrl, setDownloadUrl] = useState(null);
@@ -26,6 +28,8 @@ export default function M4aConverterModal({ isOpen, onClose, onConversionSuccess
   // DB m4a files
   const [dbM4aFiles, setDbM4aFiles] = useState([]);
   const [loadingDbFiles, setLoadingDbFiles] = useState(false);
+
+  const isVercel = typeof window !== 'undefined' && window.location.hostname.includes('vercel.app');
 
   useEffect(() => {
     if (isOpen) {
@@ -66,12 +70,17 @@ export default function M4aConverterModal({ isOpen, onClose, onConversionSuccess
     }
   };
 
-  // Convert uploaded local M4A file
   const handleConvertLocal = async () => {
     if (!selectedFile) {
       setError('M4A 오디오 파일을 먼저 선택해 주세요.');
       return;
     }
+
+    if (isVercel) {
+      setError('현재 Vercel 온라인 페이지에 접속 중입니다. M4A 변환 및 AI 음성인식은 백엔드가 실행 중인 로컬 크롬 창(http://localhost:3000)에서 실행해 주세요.');
+      return;
+    }
+
     setConverting(true);
     setError('');
     setSuccessMsg('');
@@ -82,7 +91,8 @@ export default function M4aConverterModal({ isOpen, onClose, onConversionSuccess
 
     try {
       const res = await axios.post('/api/convert/m4a-to-mp3', formData, {
-        responseType: 'blob'
+        responseType: 'blob',
+        timeout: 180000 // 3 minutes timeout for large files
       });
 
       const mp3Name = selectedFile.name.replace(/\.[^/.]+$/, "") + ".mp3";
@@ -90,9 +100,10 @@ export default function M4aConverterModal({ isOpen, onClose, onConversionSuccess
       const url = URL.createObjectURL(blob);
       setDownloadUrl(url);
       setConvertedFilename(mp3Name);
-      setSuccessMsg(`"${mp3Name}" 변환이 성공적으로 완료되었습니다!`);
+      setSuccessMsg(`"${mp3Name}" 변환이 성공적으로 완료되었습니다! 아래 다운로드 버튼을 눌러주세요.`);
     } catch (err) {
-      let msg = 'M4A 변환 중 오류가 발생했습니다.';
+      console.error('Conversion error detail:', err);
+      let msg = '';
       if (err.response?.data instanceof Blob) {
         try {
           const text = await err.response.data.text();
@@ -102,14 +113,26 @@ export default function M4aConverterModal({ isOpen, onClose, onConversionSuccess
       } else if (err.response?.data?.detail) {
         msg = err.response.data.detail;
       }
+
+      if (!msg) {
+        if (err.message === 'Network Error') {
+          msg = '백엔드 서버(포트 8000)와 통신할 수 없습니다. 바탕화면의 [AI 다국어 음성인식 스튜디오] 아이콘으로 실행했는지 확인해 주세요.';
+        } else {
+          msg = `변환 실패 (${err.message || '상태 코드 ' + (err.response?.status || '알 수 없음')})`;
+        }
+      }
       setError(msg);
     } finally {
       setConverting(false);
     }
   };
 
-  // Convert DB-stored M4A file
   const handleConvertDbAudio = async (audioItem) => {
+    if (isVercel) {
+      setError('M4A 변환은 로컬 환경(http://localhost:3000)에서 실행해 주세요.');
+      return;
+    }
+
     setConverting(true);
     setError('');
     setSuccessMsg('');
@@ -120,7 +143,7 @@ export default function M4aConverterModal({ isOpen, onClose, onConversionSuccess
       if (onConversionSuccess) onConversionSuccess();
       fetchDbM4aFiles();
     } catch (err) {
-      setError(err.response?.data?.detail || 'DB 오디오 변환 중 오류가 발생했습니다.');
+      setError(err.response?.data?.detail || err.message || 'DB 오디오 변환 중 오류가 발생했습니다.');
     } finally {
       setConverting(false);
     }
@@ -138,22 +161,39 @@ export default function M4aConverterModal({ isOpen, onClose, onConversionSuccess
             </div>
             <div>
               <h3 className="font-bold text-base leading-tight">M4A ➔ MP3 고음질 변환기</h3>
-              <p className="text-[11px] text-purple-100">192kbps 고음질 LAME 엔진 · STT 전 완벽 호환</p>
+              <p className="text-[11px] text-purple-100">192kbps 고음질 LAME 엔진 · Whisper 최적 규격</p>
             </div>
           </div>
           <button 
             onClick={onClose}
-            className="p-1.5 rounded-lg hover:bg-white/20 text-white/80 hover:text-white transition-colors"
+            className="p-1.5 rounded-lg hover:bg-white/20 text-white/80 hover:text-white transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
+        {/* Vercel Environment Notice Banner */}
+        {isVercel && (
+          <div className="p-3.5 bg-amber-50 border-b border-amber-200 text-amber-900 text-xs flex items-start gap-2.5">
+            <Laptop className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+            <div>
+              <span className="font-bold">현재 Vercel 웹페이지에 접속 중입니다:</span>
+              <p className="text-[11px] text-amber-700 mt-0.5">
+                오디오 변환 및 AI STT는 노트북 로컬 백엔드(FastAPI)가 필요합니다. 
+                바탕화면의 <span className="font-bold text-indigo-700">"AI 다국어 음성인식 스튜디오"</span> 아이콘을 누르시거나 
+                <a href="http://localhost:3000" target="_blank" rel="noreferrer" className="underline font-bold ml-1 text-indigo-600 hover:text-indigo-800">
+                  http://localhost:3000
+                </a> 으로 접속해 주세요.
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* Tab Switcher */}
         <div className="flex border-b border-slate-100 bg-slate-50/70 p-1.5 gap-1.5">
           <button
             onClick={() => { setActiveTab('local'); setError(''); }}
-            className={`flex-1 py-2 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 ${
+            className={`flex-1 py-2 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
               activeTab === 'local' 
                 ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/80' 
                 : 'text-slate-500 hover:text-slate-700'
@@ -164,7 +204,7 @@ export default function M4aConverterModal({ isOpen, onClose, onConversionSuccess
           </button>
           <button
             onClick={() => { setActiveTab('db'); setError(''); }}
-            className={`flex-1 py-2 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 ${
+            className={`flex-1 py-2 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
               activeTab === 'db' 
                 ? 'bg-white text-indigo-600 shadow-xs border border-slate-200/80' 
                 : 'text-slate-500 hover:text-slate-700'
@@ -178,15 +218,15 @@ export default function M4aConverterModal({ isOpen, onClose, onConversionSuccess
         {/* Body */}
         <div className="p-6 space-y-4">
           {error && (
-            <div className="flex items-center gap-2 p-3 text-xs text-red-700 bg-red-50 border border-red-200 rounded-xl">
-              <AlertCircle className="w-4 h-4 flex-shrink-0 text-red-500" />
+            <div className="flex items-start gap-2 p-3 text-xs text-red-700 bg-red-50 border border-red-200 rounded-xl leading-relaxed">
+              <AlertCircle className="w-4 h-4 flex-shrink-0 text-red-500 mt-0.5" />
               <span>{error}</span>
             </div>
           )}
 
           {successMsg && (
-            <div className="flex items-center gap-2 p-3 text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-xl font-medium">
-              <CheckCircle2 className="w-4 h-4 flex-shrink-0 text-emerald-600" />
+            <div className="flex items-start gap-2 p-3 text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-xl font-medium leading-relaxed">
+              <CheckCircle2 className="w-4 h-4 flex-shrink-0 text-emerald-600 mt-0.5" />
               <span>{successMsg}</span>
             </div>
           )}
@@ -237,7 +277,7 @@ export default function M4aConverterModal({ isOpen, onClose, onConversionSuccess
                   {converting ? (
                     <>
                       <Loader2 className="w-4 h-4 animate-spin" />
-                      <span>고음질 MP3 변환 중...</span>
+                      <span>고음질 MP3 변환 중... (약 2~5초 소요)</span>
                     </>
                   ) : (
                     <>
@@ -316,7 +356,7 @@ export default function M4aConverterModal({ isOpen, onClose, onConversionSuccess
           <span>변환된 MP3는 Whisper 음성인식 최적 표준 규격입니다.</span>
           <button 
             onClick={onClose}
-            className="font-bold text-slate-600 hover:text-slate-800"
+            className="font-bold text-slate-600 hover:text-slate-800 cursor-pointer"
           >
             닫기
           </button>
