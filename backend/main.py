@@ -21,12 +21,14 @@ try:
     from .models import DBAudioFile, DBAudioChunk, DBSTTDocument
     from .stt_service import STTEngine
     from .templates import generate_txt_content, generate_html_content
+    from .converter import convert_m4a_to_mp3
 except (ImportError, ValueError):
     from config import ADMIN_USERNAME, ADMIN_PASSWORD
     from database import engine, Base, get_db, SessionLocal
     from models import DBAudioFile, DBAudioChunk, DBSTTDocument
     from stt_service import STTEngine
     from templates import generate_txt_content, generate_html_content
+    from converter import convert_m4a_to_mp3
 
 logger = logging.getLogger("api")
 logging.basicConfig(level=logging.INFO)
