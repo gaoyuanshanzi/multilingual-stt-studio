@@ -1,6 +1,9 @@
 from datetime import datetime
 from sqlalchemy import Column, Integer, String, Text, Float, BigInteger, DateTime, JSON
-from .database import Base
+try:
+    from .database import Base
+except (ImportError, ValueError):
+    from database import Base
 
 class STTRecord(Base):
     __tablename__ = "stt_records"

@@ -11,14 +11,18 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from .config import (
-    UPLOAD_DIR, EXPORT_DIR,
-    ADMIN_USERNAME, ADMIN_PASSWORD
-)
-from .database import engine, Base, get_db
-from .models import STTRecord
-from .stt_service import STTEngine
-from .templates import generate_txt_content, generate_html_content
+try:
+    from .config import UPLOAD_DIR, EXPORT_DIR, ADMIN_USERNAME, ADMIN_PASSWORD
+    from .database import engine, Base, get_db
+    from .models import STTRecord
+    from .stt_service import STTEngine
+    from .templates import generate_txt_content, generate_html_content
+except (ImportError, ValueError):
+    from config import UPLOAD_DIR, EXPORT_DIR, ADMIN_USERNAME, ADMIN_PASSWORD
+    from database import engine, Base, get_db
+    from models import STTRecord
+    from stt_service import STTEngine
+    from templates import generate_txt_content, generate_html_content
 
 logger = logging.getLogger("api")
 logging.basicConfig(level=logging.INFO)

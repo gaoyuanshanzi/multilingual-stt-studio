@@ -2,7 +2,10 @@ import logging
 import time
 from typing import List, Dict, Any, Callable, Optional
 from faster_whisper import WhisperModel
-from .config import WHISPER_MODEL_SIZE, WHISPER_COMPUTE_TYPE
+try:
+    from .config import WHISPER_MODEL_SIZE, WHISPER_COMPUTE_TYPE
+except (ImportError, ValueError):
+    from config import WHISPER_MODEL_SIZE, WHISPER_COMPUTE_TYPE
 
 logger = logging.getLogger("stt_service")
 logging.basicConfig(level=logging.INFO)

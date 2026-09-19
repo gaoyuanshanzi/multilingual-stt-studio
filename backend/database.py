@@ -1,6 +1,9 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
-from .config import DATABASE_URL
+try:
+    from .config import DATABASE_URL
+except (ImportError, ValueError):
+    from config import DATABASE_URL
 
 engine = create_engine(
     DATABASE_URL,
