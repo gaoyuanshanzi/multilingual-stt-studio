@@ -110,16 +110,26 @@ export default function DbFileDirectory({
     }
   };
 
-  // 다른 이름으로 저장 (TXT 또는 HTML 다운로드)
+  // 다른 이름으로 저장 (TXT 또는 HTML 다운로드 - 브라우저 직접 Blob 생성으로 100% 안전 다운로드)
   const handleExportDoc = async (e, docItem, format) => {
     e.stopPropagation();
     setActionId(`export_${docItem.id}_${format}`);
     try {
-      const res = await axios.get(`/api/db/documents/${docItem.id}/export`, {
-        params: { format },
-        responseType: 'blob'
-      });
-      const url = window.URL.createObjectURL(new Blob([res.data]));
+      // 1. Fetch document content from DB
+      const res = await axios.get(`/api/db/documents/${docItem.id}`);
+      const doc = res.data;
+      const fileContent = format === 'html' ? doc.content_html : doc.content_txt;
+
+      if (!fileContent) {
+        throw new Error('문서 내용이 비어있습니다.');
+      }
+
+      // 2. Create UTF-8 Blob in browser
+      const mimeType = format === 'html' ? 'text/html;charset=utf-8' : 'text/plain;charset=utf-8';
+      const blob = new Blob([fileContent], { type: mimeType });
+      const url = window.URL.createObjectURL(blob);
+
+      // 3. Trigger immediate download
       const link = document.createElement('a');
       link.href = url;
       const base = docItem.filename.replace(/\.[^/.]+$/, '');
@@ -129,7 +139,24 @@ export default function DbFileDirectory({
       link.remove();
       window.URL.revokeObjectURL(url);
     } catch (err) {
-      alert('다운로드 중 오류가 발생했습니다.');
+      console.error('Download error:', err);
+      // Fallback: try direct server export endpoint
+      try {
+        const fallbackRes = await axios.get(`/api/db/documents/${docItem.id}/export?format=${format}`, {
+          responseType: 'blob'
+        });
+        const url = window.URL.createObjectURL(new Blob([fallbackRes.data]));
+        const link = document.createElement('a');
+        link.href = url;
+        const base = docItem.filename.replace(/\.[^/.]+$/, '');
+        link.setAttribute('download', `${base}_stt.${format}`);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+      } catch (fallbackErr) {
+        alert('다운로드 중 오류가 발생했습니다: ' + (err.message || ''));
+      }
     } finally {
       setActionId(null);
     }
