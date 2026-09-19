@@ -54,7 +54,12 @@ export default function AudioProgressPlayer({
       audioRef.current.pause();
       setIsPlaying(false);
     } else {
-      audioRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
+      audioRef.current.play()
+        .then(() => setIsPlaying(true))
+        .catch((err) => {
+          console.warn('Audio play prevented or failed:', err);
+          setIsPlaying(false);
+        });
     }
   };
 
@@ -68,8 +73,17 @@ export default function AudioProgressPlayer({
 
   const handleLoadedMetadata = () => {
     if (audioRef.current) {
-      setDuration(audioRef.current.duration || 0);
+      const d = audioRef.current.duration;
+      if (d && !isNaN(d) && isFinite(d)) {
+        setDuration(d);
+      } else if (currentAudio?.duration) {
+        setDuration(currentAudio.duration);
+      }
     }
+  };
+
+  const handleAudioError = (e) => {
+    console.error('Audio playback error:', e);
   };
 
   const handleSeek = (e) => {
@@ -108,8 +122,10 @@ export default function AudioProgressPlayer({
     <div className="h-full bg-white border border-slate-200/80 rounded-2xl shadow-sm px-4 md:px-6 py-3 flex items-center justify-between gap-4">
       <audio
         ref={audioRef}
+        preload="metadata"
         onTimeUpdate={handleTimeUpdate}
         onLoadedMetadata={handleLoadedMetadata}
+        onError={handleAudioError}
         onEnded={() => setIsPlaying(false)}
       />
 

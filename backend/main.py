@@ -290,13 +290,18 @@ def stream_db_audio(audio_id: int, db: Session = Depends(get_db)):
         finally:
             stream_db.close()
 
+    headers = {
+        "Content-Disposition": 'inline; filename="audio.mp3"',
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "public, max-age=3600"
+    }
+    if audio_file.file_size:
+        headers["Content-Length"] = str(audio_file.file_size)
+
     return StreamingResponse(
         chunk_generator(),
         media_type="audio/mpeg",
-        headers={
-            "Content-Disposition": f'inline; filename="{audio_file.filename}"',
-            "Content-Length": str(audio_file.file_size) if audio_file.file_size else ""
-        }
+        headers=headers
     )
 
 

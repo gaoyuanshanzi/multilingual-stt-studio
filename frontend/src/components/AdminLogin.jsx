@@ -3,8 +3,8 @@ import { Lock, User, ShieldCheck, AlertCircle, Sparkles } from 'lucide-react';
 import axios from 'axios';
 
 export default function AdminLogin({ onLoginSuccess }) {
-  const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('123jesus');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -103,9 +103,7 @@ export default function AdminLogin({ onLoginSuccess }) {
             </button>
           </div>
 
-          <div className="text-center text-xs text-slate-400 pt-1">
-            기본 ID: <span className="font-mono text-slate-600 font-semibold">admin</span> / PW: <span className="font-mono text-slate-600 font-semibold">123jesus</span>
-          </div>
+
         </form>
       </div>
     </div>
