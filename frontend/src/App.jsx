@@ -4,14 +4,14 @@ import {
   LogOut,
   ShieldCheck,
   Globe2,
-  Database,
-  HardDrive
+  Music
 } from 'lucide-react';
 import axios from 'axios';
 import AdminLogin from './components/AdminLogin';
 import DbFileDirectory from './components/DbFileDirectory';
 import MainWorkspace from './components/MainWorkspace';
 import AudioProgressPlayer from './components/AudioProgressPlayer';
+import M4aConverterModal from './components/M4aConverterModal';
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -20,6 +20,7 @@ export default function App() {
   const [seekTime, setSeekTime] = useState(null);
   const [refreshDbTrigger, setRefreshDbTrigger] = useState(0);
   const [sttTriggerItem, setSttTriggerItem] = useState(null);
+  const [showConverterModal, setShowConverterModal] = useState(false);
 
   useEffect(() => {
     const token = localStorage.getItem('admin_token');
@@ -40,7 +41,6 @@ export default function App() {
     }
 
     if (fileItem.type === 'audio') {
-      // Audio selected: stream from Neon DB in bottom player
       setCurrentAudio({
         id: fileItem.id,
         url: `/api/db/audio/${fileItem.id}`,
@@ -50,7 +50,6 @@ export default function App() {
         isFromDb: true
       });
     } else if (fileItem.type === 'document') {
-      // Document selected: load segments into text area
       try {
         const res = await axios.get(`/api/db/documents/${fileItem.id}`);
         const doc = res.data;
@@ -73,7 +72,6 @@ export default function App() {
   };
 
   const handleStartSttFromDb = (audioItem) => {
-    // Set active audio in player and trigger STT in workspace
     setCurrentAudio({
       id: audioItem.id,
       url: `/api/db/audio/${audioItem.id}`,
@@ -92,6 +90,16 @@ export default function App() {
         <AdminLogin onLoginSuccess={() => setIsAuthenticated(true)} />
       )}
 
+      {/* M4A → MP3 Converter Modal */}
+      <M4aConverterModal
+        isOpen={showConverterModal}
+        onClose={() => setShowConverterModal(false)}
+        onConversionSuccess={() => {
+          setRefreshDbTrigger(t => t + 1);
+          setShowConverterModal(false);
+        }}
+      />
+
       {/* Top Header */}
       <header className="h-14 bg-white border-b border-slate-200/80 px-5 flex items-center justify-between flex-shrink-0 z-10">
         <div className="flex items-center gap-3">
@@ -100,7 +108,7 @@ export default function App() {
           </div>
           <div>
             <h1 className="text-sm md:text-base font-bold text-slate-800 leading-none">
-              AI 다국어 음성인식 & Neon DB 스튜디오
+              AI 다국어 음성인식 &amp; Neon DB 스튜디오
             </h1>
             <p className="text-[11px] text-slate-400 font-medium mt-0.5">
               faster-whisper · Neon PostgreSQL 클라우드 오디오/문서 통합 저장소
@@ -108,7 +116,19 @@ export default function App() {
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2.5">
+          {/* M4A → MP3 변환 버튼 */}
+          {isAuthenticated && (
+            <button
+              onClick={() => setShowConverterModal(true)}
+              className="flex items-center gap-1.5 px-3.5 py-2 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white font-bold rounded-xl shadow-sm shadow-indigo-500/20 text-xs transition-all cursor-pointer"
+              title="M4A / AAC 오디오 파일을 고음질 MP3(192kbps)로 변환"
+            >
+              <Music className="w-3.5 h-3.5" />
+              <span>M4A → MP3 변환</span>
+            </button>
+          )}
+
           {isAuthenticated ? (
             <div className="flex items-center gap-2">
               <span className="flex items-center gap-1.5 px-3 py-1 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-full text-xs font-semibold">
@@ -133,37 +153,36 @@ export default function App() {
 
       {/* Main 3-Area Body Layout */}
       <div className="flex-1 p-3.5 md:p-4 flex flex-col gap-3 min-h-0">
-        {/* Top 2 Columns: [DB File directory] (Left) & [Text Workspace] (Right) */}
+        {/* Top 2 Columns */}
         <div className="flex-1 grid grid-cols-12 gap-3 min-h-0">
-          {/* Left: DB File directory (3.5 cols on lg, 4 cols on md) */}
+          {/* Left: DB File directory */}
           <div className="col-span-12 md:col-span-4 lg:col-span-4 min-h-0">
             <DbFileDirectory
               onSelectFile={handleSelectDbFile}
-              currentFileId={currentAudio ? `${currentAudio.type}_${currentAudio.id}` : null}
-              refreshTrigger={refreshDbTrigger}
               onStartSttFromDb={handleStartSttFromDb}
+              refreshTrigger={refreshDbTrigger}
             />
           </div>
 
-          {/* Right: text (Main Workspace) (8 cols on lg, 8 cols on md) */}
+          {/* Right: Main Workspace */}
           <div className="col-span-12 md:col-span-8 lg:col-span-8 min-h-0">
             <MainWorkspace
               currentAudio={currentAudio}
-              onAudioLoaded={(audioData) => setCurrentAudio(audioData)}
-              onSeekAudio={(time) => setSeekTime(time)}
               currentTime={currentTime}
-              onSaveCompleted={() => setRefreshDbTrigger(prev => prev + 1)}
+              onSeek={(t) => setSeekTime(t)}
+              onSaveCompleted={() => setRefreshDbTrigger(t => t + 1)}
               sttTriggerItem={sttTriggerItem}
+              onSttTriggerConsumed={() => setSttTriggerItem(null)}
             />
           </div>
         </div>
 
-        {/* Bottom Fixed Area: Audio file play progress */}
-        <div className="h-20 flex-shrink-0">
+        {/* Bottom: Audio Player */}
+        <div className="h-16 flex-shrink-0">
           <AudioProgressPlayer
             currentAudio={currentAudio}
             seekTime={seekTime}
-            onTimeUpdate={(time) => setCurrentTime(time)}
+            onTimeUpdate={(t) => setCurrentTime(t)}
           />
         </div>
       </div>

@@ -475,3 +475,127 @@ def delete_db_document(doc_id: int, db: Session = Depends(get_db)):
 def compat_records(search: Optional[str] = None, db: Session = Depends(get_db)):
     docs = db.query(DBSTTDocument).order_by(DBSTTDocument.id.desc()).all()
     return [d.to_dict() for d in docs]
+
+
+# ── 7. M4A to MP3 변환 API ────────────────────────────────────────────────────
+
+@app.post("/api/convert/m4a-to-mp3")
+async def convert_uploaded_m4a_to_mp3(file: UploadFile = File(...)):
+    """업로드된 M4A 파일을 즉시 고음질 MP3(192kbps)로 변환하여 다운로드 반환"""
+    import tempfile
+    import os
+    import urllib.parse
+    from starlette.responses import FileResponse
+    from backend.converter import convert_m4a_to_mp3
+
+    orig_name = file.filename or "audio.m4a"
+    stem = Path(orig_name).stem
+    out_filename = f"{stem}.mp3"
+
+    with tempfile.NamedTemporaryFile(suffix=".m4a", delete=False) as in_tmp:
+        in_path = in_tmp.name
+        content = await file.read()
+        in_tmp.write(content)
+
+    out_path = in_path.replace(".m4a", "_conv.mp3")
+
+    try:
+        convert_m4a_to_mp3(in_path, out_path, bitrate="192k")
+        quoted_name = urllib.parse.quote(out_filename)
+        headers = {
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quoted_name}",
+            "Access-Control-Expose-Headers": "Content-Disposition"
+        }
+        return FileResponse(
+            out_path,
+            media_type="audio/mpeg",
+            headers=headers,
+            filename=out_filename
+        )
+    finally:
+        if os.path.exists(in_path):
+            try:
+                os.remove(in_path)
+            except Exception:
+                pass
+
+
+@app.post("/api/convert/db-audio/{audio_id}/to-mp3")
+def convert_db_m4a_to_mp3(audio_id: int, db: Session = Depends(get_db)):
+    """Neon DB에 저장된 M4A 오디오를 MP3로 변환하여 새로운 DB 오디오 항목으로 자동 등록"""
+    import tempfile
+    import os
+    from backend.converter import convert_m4a_to_mp3
+
+    audio_file = db.query(DBAudioFile).filter(DBAudioFile.id == audio_id).first()
+    if not audio_file:
+        raise HTTPException(status_code=404, detail="오디오 파일을 찾을 수 없습니다.")
+
+    stem = Path(audio_file.filename).stem
+    new_filename = f"{stem}.mp3"
+
+    # 1. 청크 조립
+    with tempfile.NamedTemporaryFile(suffix=".m4a", delete=False) as in_tmp:
+        in_path = in_tmp.name
+        chunks = (
+            db.query(DBAudioChunk)
+            .filter(DBAudioChunk.audio_file_id == audio_id)
+            .order_by(DBAudioChunk.chunk_index.asc())
+            .all()
+        )
+        for chk in chunks:
+            in_tmp.write(chk.chunk_data)
+
+    out_path = in_path.replace(".m4a", "_conv.mp3")
+
+    try:
+        convert_m4a_to_mp3(in_path, out_path, bitrate="192k")
+        mp3_size = os.path.getsize(out_path)
+
+        # 2. Neon DB에 새 MP3 오디오 레코드 생성
+        new_audio = DBAudioFile(
+            filename=new_filename,
+            file_size=mp3_size,
+            is_complete=True,
+            created_at=datetime.utcnow()
+        )
+        db.add(new_audio)
+        db.commit()
+        db.refresh(new_audio)
+
+        # 3. 1MB 청크 분할 저장
+        CHUNK_SIZE = 1024 * 1024
+        with open(out_path, "rb") as f:
+            chunk_idx = 0
+            while True:
+                data = f.read(CHUNK_SIZE)
+                if not data:
+                    break
+                chunk_record = DBAudioChunk(
+                    audio_file_id=new_audio.id,
+                    chunk_index=chunk_idx,
+                    chunk_data=data
+                )
+                db.add(chunk_record)
+                chunk_idx += 1
+
+        db.commit()
+        logger.info("Converted DB audio %d (%s) to MP3 %d (%s, %d bytes)", audio_id, audio_file.filename, new_audio.id, new_filename, mp3_size)
+
+        return {
+            "success": True,
+            "message": f"'{audio_file.filename}'이(가) MP3 '{new_filename}'({mp3_size / 1048576:.1f}MB)으로 성공적으로 변환되어 Neon DB에 등록되었습니다.",
+            "new_audio": {
+                "id": new_audio.id,
+                "filename": new_audio.filename,
+                "file_size": new_audio.file_size,
+                "audio_url": f"/api/db/audio/{new_audio.id}"
+            }
+        }
+    finally:
+        for p in (in_path, out_path):
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass

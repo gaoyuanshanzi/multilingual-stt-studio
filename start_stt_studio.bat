@@ -27,9 +27,25 @@ if %errorlevel% neq 0 (
     echo [2/3] 프론트엔드 웹 서버가 이미 작동 중입니다.
 )
 
-:: 3. Wait 2 seconds and open browser
-echo [3/3] 브라우저 실행 중...
+:: 3. Wait 2 seconds and open Google Chrome
+echo [3/3] Google Chrome으로 브라우저 실행 중...
 timeout /t 2 /nobreak > nul
-start "" "http://localhost:3000"
+
+:: Try Chrome in common installation paths
+set CHROME_PATH=
+if exist "%ProgramFiles%\Google\Chrome\Application\chrome.exe" (
+    set CHROME_PATH="%ProgramFiles%\Google\Chrome\Application\chrome.exe"
+) else if exist "%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe" (
+    set CHROME_PATH="%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"
+) else if exist "%LocalAppData%\Google\Chrome\Application\chrome.exe" (
+    set CHROME_PATH="%LocalAppData%\Google\Chrome\Application\chrome.exe"
+)
+
+if defined CHROME_PATH (
+    start "" %CHROME_PATH% "http://localhost:3000"
+) else (
+    echo [경고] Chrome을 찾지 못했습니다. 기본 브라우저로 실행합니다.
+    start "" "http://localhost:3000"
+)
 
 exit
