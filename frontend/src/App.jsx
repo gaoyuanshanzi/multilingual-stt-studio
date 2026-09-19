@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { 
-  Sparkles, 
-  LogOut, 
-  Layers, 
-  ShieldCheck, 
-  Globe2, 
-  Database 
+import {
+  Sparkles,
+  LogOut,
+  ShieldCheck,
+  Globe2,
+  Database,
+  HardDrive
 } from 'lucide-react';
+import axios from 'axios';
 import AdminLogin from './components/AdminLogin';
 import DbFileDirectory from './components/DbFileDirectory';
 import MainWorkspace from './components/MainWorkspace';
@@ -18,6 +19,7 @@ export default function App() {
   const [currentTime, setCurrentTime] = useState(0);
   const [seekTime, setSeekTime] = useState(null);
   const [refreshDbTrigger, setRefreshDbTrigger] = useState(0);
+  const [sttTriggerItem, setSttTriggerItem] = useState(null);
 
   useEffect(() => {
     const token = localStorage.getItem('admin_token');
@@ -31,21 +33,56 @@ export default function App() {
     setIsAuthenticated(false);
   };
 
-  const handleSelectDbRecord = (record) => {
-    if (!record) {
+  const handleSelectDbFile = async (fileItem) => {
+    if (!fileItem) {
       setCurrentAudio(null);
       return;
     }
+
+    if (fileItem.type === 'audio') {
+      // Audio selected: stream from Neon DB in bottom player
+      setCurrentAudio({
+        id: fileItem.id,
+        url: `/api/db/audio/${fileItem.id}`,
+        filename: fileItem.filename,
+        duration: 0,
+        type: 'audio',
+        isFromDb: true
+      });
+    } else if (fileItem.type === 'document') {
+      // Document selected: load segments into text area
+      try {
+        const res = await axios.get(`/api/db/documents/${fileItem.id}`);
+        const doc = res.data;
+        setCurrentAudio({
+          id: doc.id,
+          url: doc.audio_url || null,
+          filename: doc.filename,
+          duration: doc.duration,
+          detected_languages: doc.detected_languages,
+          segments: doc.segments,
+          content_txt: doc.content_txt,
+          content_html: doc.content_html,
+          type: 'document',
+          isFromDb: true
+        });
+      } catch (err) {
+        alert('문서 데이터를 불러오는 중 오류가 발생했습니다.');
+      }
+    }
+  };
+
+  const handleStartSttFromDb = (audioItem) => {
+    // Set active audio in player and trigger STT in workspace
     setCurrentAudio({
-      id: record.id,
-      url: record.audio_url || `/api/audio/${record.id}`,
-      filename: record.filename,
-      duration: record.duration,
-      detected_languages: record.detected_languages,
-      segments: record.segments,
-      full_text: record.full_text,
+      id: audioItem.id,
+      url: `/api/db/audio/${audioItem.id}`,
+      filename: audioItem.filename,
+      duration: 0,
+      type: 'audio',
       isFromDb: true
     });
+    setSttTriggerItem(audioItem);
   };
 
   return (
@@ -63,10 +100,10 @@ export default function App() {
           </div>
           <div>
             <h1 className="text-sm md:text-base font-bold text-slate-800 leading-none">
-              AI 다국어 음성인식 & 타임스탬프 스튜디오
+              AI 다국어 음성인식 & Neon DB 스튜디오
             </h1>
             <p className="text-[11px] text-slate-400 font-medium mt-0.5">
-              faster-whisper Small · int8 · VAD 자동 감지 · Neon DB
+              faster-whisper · Neon PostgreSQL 클라우드 오디오/문서 통합 저장소
             </p>
           </div>
         </div>
@@ -98,23 +135,25 @@ export default function App() {
       <div className="flex-1 p-3.5 md:p-4 flex flex-col gap-3 min-h-0">
         {/* Top 2 Columns: [DB File directory] (Left) & [Text Workspace] (Right) */}
         <div className="flex-1 grid grid-cols-12 gap-3 min-h-0">
-          {/* Left: DB File directory (3 cols on lg, 4 cols on md) */}
-          <div className="col-span-12 md:col-span-4 lg:col-span-3 min-h-0">
+          {/* Left: DB File directory (3.5 cols on lg, 4 cols on md) */}
+          <div className="col-span-12 md:col-span-4 lg:col-span-4 min-h-0">
             <DbFileDirectory
-              onSelectRecord={handleSelectDbRecord}
-              currentRecordId={currentAudio?.id}
+              onSelectFile={handleSelectDbFile}
+              currentFileId={currentAudio ? `${currentAudio.type}_${currentAudio.id}` : null}
               refreshTrigger={refreshDbTrigger}
+              onStartSttFromDb={handleStartSttFromDb}
             />
           </div>
 
-          {/* Right: text (Main Workspace) (9 cols on lg, 8 cols on md) */}
-          <div className="col-span-12 md:col-span-8 lg:col-span-9 min-h-0">
+          {/* Right: text (Main Workspace) (8 cols on lg, 8 cols on md) */}
+          <div className="col-span-12 md:col-span-8 lg:col-span-8 min-h-0">
             <MainWorkspace
               currentAudio={currentAudio}
               onAudioLoaded={(audioData) => setCurrentAudio(audioData)}
               onSeekAudio={(time) => setSeekTime(time)}
               currentTime={currentTime}
               onSaveCompleted={() => setRefreshDbTrigger(prev => prev + 1)}
+              sttTriggerItem={sttTriggerItem}
             />
           </div>
         </div>

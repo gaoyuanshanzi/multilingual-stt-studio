@@ -7,13 +7,14 @@ import {
   Check,
   Volume2,
   Languages,
-  Sparkles,
   Clock,
   FileAudio,
   Loader2,
   Filter,
   AlertCircle,
-  CheckCircle2
+  CheckCircle2,
+  Trash2,
+  Database
 } from 'lucide-react';
 import axios from 'axios';
 import SaveModal from './SaveModal';
@@ -39,11 +40,13 @@ export default function MainWorkspace({
   onAudioLoaded,
   onSeekAudio,
   currentTime,
-  onSaveCompleted
+  onSaveCompleted,
+  sttTriggerItem
 }) {
   const [file, setFile] = useState(null);
+  const [currentDbAudioId, setCurrentDbAudioId] = useState(null);
   const [taskId, setTaskId] = useState(null);
-  const [taskStatus, setTaskStatus] = useState('idle');
+  const [taskStatus, setTaskStatus] = useState('idle'); // idle, uploading, processing, completed, failed
   const [progress, setProgress] = useState(0);
   const [statusMessage, setStatusMessage] = useState('');
   const [result, setResult] = useState(null);
@@ -55,22 +58,34 @@ export default function MainWorkspace({
   const fileInputRef = useRef(null);
   const pollingRef = useRef(null);
 
+  // Sync if STT Document or Audio is selected from DB File directory
   useEffect(() => {
     if (currentAudio && currentAudio.isFromDb) {
-      setFile(null);
-      setTaskId(null);
-      setTaskStatus('completed');
-      setProgress(100);
-      setStatusMessage('DB에서 불러온 기록');
-      setErrorMsg('');
-      setResult({
-        duration: currentAudio.duration,
-        detected_languages: currentAudio.detected_languages || [],
-        segments: currentAudio.segments || [],
-        full_text: currentAudio.full_text || ''
-      });
+      if (currentAudio.type === 'document') {
+        setFile(null);
+        setTaskId(null);
+        setTaskStatus('completed');
+        setProgress(100);
+        setStatusMessage('Neon DB에서 불러온 STT 문서');
+        setErrorMsg('');
+        setResult({
+          duration: currentAudio.duration,
+          detected_languages: currentAudio.detected_languages || [],
+          segments: currentAudio.segments || [],
+          full_text: currentAudio.content_txt || ''
+        });
+      } else if (currentAudio.type === 'audio') {
+        setCurrentDbAudioId(currentAudio.id);
+      }
     }
   }, [currentAudio]);
+
+  // If user clicked [STT 작업 시작] from DB file directory on an existing audio
+  useEffect(() => {
+    if (sttTriggerItem && sttTriggerItem.type === 'audio') {
+      startSttFromExistingDbAudio(sttTriggerItem.id, sttTriggerItem.filename);
+    }
+  }, [sttTriggerItem]);
 
   useEffect(() => () => stopPolling(), []);
 
@@ -86,10 +101,11 @@ export default function MainWorkspace({
     if (!selected) return;
     stopPolling();
     setFile(selected);
+    setCurrentDbAudioId(null);
     setTaskId(null);
     setTaskStatus('ready');
     setProgress(0);
-    setStatusMessage(`선택된 파일: ${selected.name} (${(selected.size / (1024 * 1024)).toFixed(1)} MB)`);
+    setStatusMessage(`선택된 파일: ${selected.name} (${(selected.size / (1024 * 1024)).toFixed(1)} MB) - [작동] 클릭 시 Neon DB에 업로드 후 STT가 시작됩니다.`);
     setResult(null);
     setErrorMsg('');
 
@@ -101,12 +117,11 @@ export default function MainWorkspace({
     e.preventDefault();
     const dropped = e.dataTransfer.files[0];
     if (dropped) {
-      const fakeEvent = { target: { files: [dropped] } };
-      handleFileChange(fakeEvent);
+      handleFileChange({ target: { files: [dropped] } });
     }
   };
 
-  // ── 1MB Chunked Streaming Upload (150MB+ Safe) ───────────────────
+  // ── 1. Neon DB에 1MB 청크 업로드 ➔ 즉시 STT 변환 시작 ───────────────────
   const startUploadAndStt = async () => {
     if (!file) return;
     stopPolling();
@@ -119,67 +134,76 @@ export default function MainWorkspace({
     const totalChunks = Math.ceil(totalSize / CHUNK_SIZE);
     const totalMbStr = (totalSize / (1024 * 1024)).toFixed(1);
 
-    setStatusMessage(`대용량 청크 전송 초기화 중... (총 ${totalMbStr} MB / ${totalChunks}개 청크)`);
-
-    let finalTaskId = null;
+    setStatusMessage(`Neon DB 오디오 청크 세션 생성 중... (${totalMbStr} MB / ${totalChunks}개 청크)`);
 
     try {
-      // 1. Initialize chunked upload session
-      const initRes = await axios.post('/api/upload/init', {
+      // 1) Init audio session in Neon PostgreSQL
+      const initRes = await axios.post('/api/db/audio/init', {
         filename: file.name,
-        total_size: totalSize,
+        file_size: totalSize,
         total_chunks: totalChunks
       });
-      const uploadId = initRes.data.upload_id;
+      const audioId = initRes.data.audio_id;
+      setCurrentDbAudioId(audioId);
 
-      // 2. Upload chunks in loop (1MB each, completely bypasses Vercel 4.5MB payload limit)
+      // 2) Upload 1MB chunks directly into Neon DB
       for (let i = 0; i < totalChunks; i++) {
         const start = i * CHUNK_SIZE;
         const end = Math.min(totalSize, start + CHUNK_SIZE);
         const chunkBlob = file.slice(start, end);
 
-        const chunkFormData = new FormData();
-        chunkFormData.append('upload_id', uploadId);
-        chunkFormData.append('chunk_index', i);
-        chunkFormData.append('chunk', chunkBlob, `${file.name}.part${i}`);
+        const formData = new FormData();
+        formData.append('audio_id', audioId);
+        formData.append('chunk_index', i);
+        formData.append('chunk', chunkBlob, `chunk_${i}.bin`);
 
-        await axios.post('/api/upload/chunk', chunkFormData, {
+        await axios.post('/api/db/audio/chunk', formData, {
           headers: { 'Content-Type': 'multipart/form-data' }
         });
 
         const uploadedMb = ((end) / (1024 * 1024)).toFixed(1);
-        const uploadPercent = Math.round(((i + 1) / totalChunks) * 35); // 0% ~ 35% for upload
+        const uploadPercent = Math.round(((i + 1) / totalChunks) * 30); // 0% ~ 30% for upload
         setProgress(uploadPercent);
-        setStatusMessage(`1MB 청크 스트리밍 전송 중... [${uploadedMb} MB / ${totalMbStr} MB] (${i + 1}/${totalChunks})`);
+        setStatusMessage(`Neon DB에 오디오 청크 저장 중... [${uploadedMb} MB / ${totalMbStr} MB] (${i + 1}/${totalChunks})`);
       }
 
-      // 3. Complete chunked upload and merge
-      setStatusMessage('오디오 청크 결합 및 검증 중...');
-      const completeFormData = new FormData();
-      completeFormData.append('upload_id', uploadId);
-      const completeRes = await axios.post('/api/upload/complete', completeFormData);
-
-      finalTaskId = completeRes.data.task_id;
-      setTaskId(finalTaskId);
+      // 3) Mark audio upload complete in Neon DB
+      const compRes = await axios.post('/api/db/audio/complete', new URLSearchParams({ audio_id: audioId }));
       onAudioLoaded({
-        url: completeRes.data.audio_url,
-        filename: completeRes.data.filename,
+        id: audioId,
+        url: compRes.data.audio_url,
+        filename: compRes.data.filename,
         duration: 0,
-        isFromDb: false
+        isFromDb: true,
+        type: 'audio'
       });
 
-      // 4. Trigger STT processing
-      setTaskStatus('processing');
-      setProgress(38);
-      setStatusMessage('faster-whisper 모델 구동 및 VAD 음성 구간 분석 시작...');
-
-      await axios.post(`/api/tasks/${finalTaskId}/start`);
-      startPolling(finalTaskId);
+      // 4) Trigger STT on the uploaded Neon DB audio
+      await startSttFromExistingDbAudio(audioId, file.name);
 
     } catch (err) {
       setTaskStatus('failed');
-      const errDetail = err.response?.data?.detail || err.message || '업로드 중 오류가 발생했습니다.';
-      setErrorMsg(`업로드 오류: ${errDetail}`);
+      const detail = err.response?.data?.detail || err.message || 'Neon DB 오디오 업로드 중 오류가 발생했습니다.';
+      setErrorMsg(`업로드 오류: ${detail}`);
+      setStatusMessage('');
+    }
+  };
+
+  // ── 2. Neon DB에 이미 보관된 오디오로 STT 시작 ────────────────────────────
+  const startSttFromExistingDbAudio = async (audioId, audioFilename) => {
+    try {
+      setTaskStatus('processing');
+      setProgress(35);
+      setStatusMessage(`Neon DB에서 [${audioFilename}] 로딩 및 faster-whisper STT 시작 중...`);
+
+      const sttRes = await axios.post(`/api/db/audio/${audioId}/stt`);
+      const newTaskId = sttRes.data.task_id;
+      setTaskId(newTaskId);
+
+      startPolling(newTaskId);
+    } catch (err) {
+      setTaskStatus('failed');
+      setErrorMsg(err.response?.data?.detail || 'STT 작업 시작에 실패했습니다.');
       setStatusMessage('');
     }
   };
@@ -191,15 +215,16 @@ export default function MainWorkspace({
         const data = res.data;
 
         if (data.status === 'processing') {
-          const pct = Math.max(38, Math.round(data.progress || 38));
+          const pct = Math.max(35, Math.round(data.progress || 35));
           setProgress(pct);
-          setStatusMessage(data.message || '다국어 음성 인식 분석 중...');
+          setStatusMessage(data.message || 'Neon DB 오디오 기반 다국어 STT 변환 중...');
         } else if (data.status === 'completed') {
           stopPolling();
           setTaskStatus('completed');
           setProgress(100);
-          setStatusMessage(`✅ 완료! 총 ${data.result?.segments?.length || 0}개 구간 인식`);
+          setStatusMessage(`✅ STT 변환 및 Neon DB 저장 완료! 총 ${data.result?.segments?.length || 0}개 구간 인식`);
           setResult(data.result);
+          if (onSaveCompleted) onSaveCompleted();
         } else if (data.status === 'failed') {
           stopPolling();
           setTaskStatus('failed');
@@ -281,7 +306,7 @@ export default function MainWorkspace({
               disabled={!result}
               className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl shadow-md shadow-emerald-500/20 transition-all flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              <Save className="w-4 h-4" /><span>저장</span>
+              <Save className="w-4 h-4" /><span>저장 옵션</span>
             </button>
 
             <button
@@ -307,26 +332,31 @@ export default function MainWorkspace({
             </div>
             <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden border border-slate-200/60">
               <div
-                className="bg-gradient-to-r from-blue-500 to-indigo-600 h-2 rounded-full transition-all duration-300"
+                className="bg-gradient-to-r from-blue-500 to-indigo-600 h-2 rounded-full transition-all duration-500"
                 style={{ width: `${progress}%` }}
               />
             </div>
             <p className="text-[11px] text-slate-400 mt-1 text-center font-medium">
-              ⚡ 1MB 청크 스트리밍 방식으로 대용량 오디오(150MB+)를 메모리 과부하 없이 안정적으로 전송합니다.
+              💡 1MB 청크 단위로 Neon PostgreSQL DB에 안전하게 직접 저장된 후 STT가 수행됩니다.
             </p>
           </div>
         )}
 
-        {/* Status messages */}
+        {/* Status messages & Capacity Cleanup Guide */}
         {taskStatus === 'completed' && !isWorking && (
-          <div className="mt-2 flex items-center gap-2 text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-xl">
-            <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
-            {statusMessage}
+          <div className="mt-2.5 p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center justify-between flex-wrap gap-2 text-xs">
+            <div className="flex items-center gap-2 font-semibold text-emerald-800">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+              <span>{statusMessage}</span>
+            </div>
+            <span className="text-[11px] font-medium text-emerald-700 bg-white/80 px-2.5 py-1 rounded-lg border border-emerald-200">
+              💡 좌측 DB 디렉토리에서 <strong>[오디오 완전삭제 (용량 확보)]</strong>를 누르면 텍스트는 남기고 150MB 오디오 용량을 즉시 회수할 수 있습니다!
+            </span>
           </div>
         )}
 
         {errorMsg && (
-          <div className="mt-2 flex items-center gap-2 text-xs font-semibold text-red-700 bg-red-50 border border-red-200 px-3 py-1.5 rounded-xl">
+          <div className="mt-2.5 flex items-center gap-2 text-xs font-semibold text-red-700 bg-red-50 border border-red-200 px-3 py-2 rounded-xl">
             <AlertCircle className="w-4 h-4 flex-shrink-0" />
             {errorMsg}
           </div>
@@ -371,7 +401,7 @@ export default function MainWorkspace({
             </div>
             <h3 className="font-bold text-slate-800 text-base mb-1">STT 변환 결과 공간</h3>
             <p className="text-xs text-slate-500 max-w-sm leading-relaxed mb-4">
-              MP3 또는 M4A 오디오 파일을 업로드하고 <strong>[작동]</strong> 버튼을 누르면 구간별 다국어 인식 결과가 타임스탬프와 함께 시각화됩니다.
+              오디오 파일을 선택하고 <strong>[작동 (STT 시작)]</strong> 버튼을 누르면 Neon DB에 1MB 청크로 직접 업로드된 후 구간별 다국어 인식 결과가 시각화됩니다.
             </p>
             <div className="flex items-center gap-3 text-[11px] text-slate-400 flex-wrap justify-center">
               {Object.entries(LANG_CONFIG).map(([code, cfg]) => (
@@ -432,7 +462,7 @@ export default function MainWorkspace({
         onClose={() => setIsSaveModalOpen(false)}
         taskId={taskId}
         filename={file?.name || currentAudio?.filename || 'stt_transcript'}
-        onSaveCompleted={(data) => { onSaveCompleted(data); }}
+        onSaveCompleted={(data) => { if (onSaveCompleted) onSaveCompleted(data); }}
       />
     </div>
   );
