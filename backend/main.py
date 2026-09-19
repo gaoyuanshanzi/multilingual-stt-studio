@@ -485,39 +485,50 @@ async def convert_uploaded_m4a_to_mp3(file: UploadFile = File(...)):
     import tempfile
     import os
     import urllib.parse
-    from starlette.responses import FileResponse
-    from backend.converter import convert_m4a_to_mp3
 
     orig_name = file.filename or "audio.m4a"
     stem = Path(orig_name).stem
     out_filename = f"{stem}.mp3"
 
-    with tempfile.NamedTemporaryFile(suffix=".m4a", delete=False) as in_tmp:
-        in_path = in_tmp.name
-        content = await file.read()
-        in_tmp.write(content)
-
-    out_path = in_path.replace(".m4a", "_conv.mp3")
+    # 입력 tempfile (m4a)
+    in_fd, in_path = tempfile.mkstemp(suffix=".m4a")
+    out_fd, out_path = tempfile.mkstemp(suffix=".mp3")
+    os.close(in_fd)
+    os.close(out_fd)
 
     try:
+        # 파일 내용 쓰기
+        data = await file.read()
+        with open(in_path, "wb") as f:
+            f.write(data)
+
+        # ffmpeg 변환
         convert_m4a_to_mp3(in_path, out_path, bitrate="192k")
+
+        # 변환된 MP3 내용 읽어 Response 반환
+        with open(out_path, "rb") as f:
+            mp3_data = f.read()
+
         quoted_name = urllib.parse.quote(out_filename)
-        headers = {
-            "Content-Disposition": f"attachment; filename*=UTF-8''{quoted_name}",
-            "Access-Control-Expose-Headers": "Content-Disposition"
-        }
-        return FileResponse(
-            out_path,
+        from fastapi.responses import Response
+        return Response(
+            content=mp3_data,
             media_type="audio/mpeg",
-            headers=headers,
-            filename=out_filename
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{quoted_name}",
+                "Access-Control-Expose-Headers": "Content-Disposition"
+            }
         )
+    except Exception as e:
+        logger.error("M4A conversion error: %s", e)
+        raise HTTPException(status_code=500, detail=f"M4A 변환 실패: {str(e)}")
     finally:
-        if os.path.exists(in_path):
-            try:
-                os.remove(in_path)
-            except Exception:
-                pass
+        for p in (in_path, out_path):
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
 
 
 @app.post("/api/convert/db-audio/{audio_id}/to-mp3")
@@ -525,7 +536,6 @@ def convert_db_m4a_to_mp3(audio_id: int, db: Session = Depends(get_db)):
     """Neon DB에 저장된 M4A 오디오를 MP3로 변환하여 새로운 DB 오디오 항목으로 자동 등록"""
     import tempfile
     import os
-    from backend.converter import convert_m4a_to_mp3
 
     audio_file = db.query(DBAudioFile).filter(DBAudioFile.id == audio_id).first()
     if not audio_file:

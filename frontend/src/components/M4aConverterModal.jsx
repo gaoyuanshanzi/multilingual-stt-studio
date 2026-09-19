@@ -92,7 +92,17 @@ export default function M4aConverterModal({ isOpen, onClose, onConversionSuccess
       setConvertedFilename(mp3Name);
       setSuccessMsg(`"${mp3Name}" 변환이 성공적으로 완료되었습니다!`);
     } catch (err) {
-      setError(err.response?.data?.detail || 'M4A 변환 중 오류가 발생했습니다.');
+      let msg = 'M4A 변환 중 오류가 발생했습니다.';
+      if (err.response?.data instanceof Blob) {
+        try {
+          const text = await err.response.data.text();
+          const json = JSON.parse(text);
+          if (json.detail) msg = json.detail;
+        } catch (_) {}
+      } else if (err.response?.data?.detail) {
+        msg = err.response.data.detail;
+      }
+      setError(msg);
     } finally {
       setConverting(false);
     }
