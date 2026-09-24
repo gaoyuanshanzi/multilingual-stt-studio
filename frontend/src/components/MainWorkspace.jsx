@@ -470,6 +470,7 @@ export default function MainWorkspace({
         onClose={() => setIsSaveModalOpen(false)}
         taskId={taskId}
         filename={file?.name || currentAudio?.filename || 'stt_transcript'}
+        result={result}
         onSaveCompleted={(data) => { if (onSaveCompleted) onSaveCompleted(data); }}
       />
     </div>
