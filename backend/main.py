@@ -84,7 +84,7 @@ def verify_admin(authorization: Optional[str] = Header(None)):
 
 
 # ── STT Worker that reads audio chunks directly from Neon DB ─────────────────
-def _neon_db_stt_worker(task_id: str, audio_id: int):
+def _neon_db_stt_worker(task_id: str, audio_id: int, hint_languages: Optional[List[str]] = None):
     db: Session = SessionLocal()
     temp_path = None
     try:
@@ -117,7 +117,7 @@ def _neon_db_stt_worker(task_id: str, audio_id: int):
                 tmp.write(chk.chunk_data)
 
         update_progress(15.0, f"Neon DB 오디오 로드 완료 ({(os.path.getsize(temp_path)/1048576):.1f}MB). STT 모델 구동 중...")
-        result = STTEngine.transcribe_audio(temp_path, progress_callback=update_progress)
+        result = STTEngine.transcribe_audio(temp_path, progress_callback=update_progress, hint_languages=hint_languages or [])
 
         # Generate TXT and HTML representations
         filename = audio_file.filename
@@ -311,12 +311,18 @@ def stream_db_audio(audio_id: int, db: Session = Depends(get_db)):
 
 # ── 3. Neon DB 오디오 기반 STT 작업 시작 및 상태 폴링 ─────────────────────────
 
+class SttStartRequest(BaseModel):
+    hint_languages: Optional[List[str]] = []
+
 @app.post("/api/db/audio/{audio_id}/stt")
-def start_neon_db_stt(audio_id: int, db: Session = Depends(get_db)):
-    """Neon DB에 저장된 오디오를 읽어 STT 변환 시작"""
+def start_neon_db_stt(audio_id: int, body: SttStartRequest = SttStartRequest(), db: Session = Depends(get_db)):
+    """Neon DB에 저장된 오디오를 읽어 STT 변환 시작 (다국어 힌트 지원)"""
     audio_file = db.query(DBAudioFile).filter(DBAudioFile.id == audio_id).first()
     if not audio_file:
         raise HTTPException(status_code=404, detail="오디오 파일을 찾을 수 없습니다.")
+
+    hint_languages = body.hint_languages or []
+    lang_mode = f"다국어({', '.join(hint_languages)})" if len(hint_languages) >= 2 else (hint_languages[0] if hint_languages else "자동 감지")
 
     task_id = str(uuid.uuid4())
     with _tasks_lock:
@@ -327,14 +333,15 @@ def start_neon_db_stt(audio_id: int, db: Session = Depends(get_db)):
             "file_size": audio_file.file_size,
             "status": "processing",
             "progress": 5.0,
-            "message": "Neon DB 오디오 로딩 및 STT 엔진 준비 중...",
+            "message": f"Neon DB 오디오 로딩 및 STT 엔진 준비 중... [{lang_mode}]",
             "result": None,
             "audio_url": f"/api/db/audio/{audio_id}",
-            "created_at": datetime.utcnow().isoformat()
+            "created_at": datetime.utcnow().isoformat(),
+            "hint_languages": hint_languages,
         }
 
-    _thread_pool.submit(_neon_db_stt_worker, task_id, audio_id)
-    return {"task_id": task_id, "audio_id": audio_id, "message": "STT 작업이 시작되었습니다."}
+    _thread_pool.submit(_neon_db_stt_worker, task_id, audio_id, hint_languages)
+    return {"task_id": task_id, "audio_id": audio_id, "message": f"STT 작업이 시작되었습니다. [{lang_mode}]"}
 
 
 @app.get("/api/tasks/{task_id}")

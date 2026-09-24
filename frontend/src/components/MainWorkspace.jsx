@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import axios from 'axios';
 import SaveModal from './SaveModal';
+import LangSelectModal from './LangSelectModal';
 
 const LANG_CONFIG = {
   ko: { name: '한국어', color: 'bg-blue-100 text-blue-800 border-blue-200' },
@@ -46,7 +47,7 @@ export default function MainWorkspace({
   const [file, setFile] = useState(null);
   const [currentDbAudioId, setCurrentDbAudioId] = useState(null);
   const [taskId, setTaskId] = useState(null);
-  const [taskStatus, setTaskStatus] = useState('idle'); // idle, uploading, processing, completed, failed
+  const [taskStatus, setTaskStatus] = useState('idle');
   const [progress, setProgress] = useState(0);
   const [statusMessage, setStatusMessage] = useState('');
   const [result, setResult] = useState(null);
@@ -54,6 +55,7 @@ export default function MainWorkspace({
   const [selectedLangFilter, setSelectedLangFilter] = useState('all');
   const [copied, setCopied] = useState(false);
   const [isSaveModalOpen, setIsSaveModalOpen] = useState(false);
+  const [isLangModalOpen, setIsLangModalOpen] = useState(false);
 
   const fileInputRef = useRef(null);
   const pollingRef = useRef(null);
@@ -122,7 +124,7 @@ export default function MainWorkspace({
   };
 
   // ── 1. Neon DB에 1MB 청크 업로드 ➔ 즉시 STT 변환 시작 ───────────────────
-  const startUploadAndStt = async () => {
+  const startUploadAndStt = async (hintLanguages = []) => {
     if (!file) return;
     stopPolling();
     setErrorMsg('');
@@ -179,7 +181,7 @@ export default function MainWorkspace({
       });
 
       // 4) Trigger STT on the uploaded Neon DB audio
-      await startSttFromExistingDbAudio(audioId, file.name);
+      await startSttFromExistingDbAudio(audioId, file.name, hintLanguages);
 
     } catch (err) {
       setTaskStatus('failed');
@@ -190,13 +192,16 @@ export default function MainWorkspace({
   };
 
   // ── 2. Neon DB에 이미 보관된 오디오로 STT 시작 ────────────────────────────
-  const startSttFromExistingDbAudio = async (audioId, audioFilename) => {
+  const startSttFromExistingDbAudio = async (audioId, audioFilename, hintLanguages = []) => {
     try {
       setTaskStatus('processing');
       setProgress(35);
-      setStatusMessage(`Neon DB에서 [${audioFilename}] 로딩 및 faster-whisper STT 시작 중...`);
+      const langHintLabel = hintLanguages.length > 0 ? ` [언어: ${hintLanguages.join(', ')}]` : '';
+      setStatusMessage(`Neon DB에서 [${audioFilename}] 로딩 및 STT 시작 중...${langHintLabel}`);
 
-      const sttRes = await axios.post(`/api/db/audio/${audioId}/stt`);
+      const sttRes = await axios.post(`/api/db/audio/${audioId}/stt`, {
+        hint_languages: hintLanguages
+      });
       const newTaskId = sttRes.data.task_id;
       setTaskId(newTaskId);
 
@@ -300,9 +305,9 @@ export default function MainWorkspace({
           {/* Action buttons */}
           <div className="flex items-center gap-2">
             <button
-              onClick={startUploadAndStt}
-              disabled={!file || isWorking}
-              className="px-5 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white text-xs font-bold rounded-xl shadow-md shadow-blue-500/20 transition-all flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+              onClick={() => setIsLangModalOpen(true)}
+              disabled={(!file && !currentDbAudioId) || isWorking}
+              className="px-5 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white text-xs font-bold rounded-xl shadow-md shadow-blue-500/20 transition-all flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
             >
               {isWorking
                 ? <><Loader2 className="w-4 h-4 animate-spin" /><span>인식 진행 중...</span></>
@@ -463,6 +468,21 @@ export default function MainWorkspace({
           })
         )}
       </div>
+
+      {/* Language Selection Modal */}
+      <LangSelectModal
+        isOpen={isLangModalOpen}
+        onClose={() => setIsLangModalOpen(false)}
+        filename={file?.name || currentAudio?.filename || ''}
+        onStart={(selectedLangs) => {
+          setIsLangModalOpen(false);
+          if (file) {
+            startUploadAndStt(selectedLangs);
+          } else if (currentDbAudioId) {
+            startSttFromExistingDbAudio(currentDbAudioId, currentAudio?.filename || '오디오', selectedLangs);
+          }
+        }}
+      />
 
       {/* Save Modal */}
       <SaveModal
