@@ -169,6 +169,7 @@ export default function App() {
             <MainWorkspace
               currentAudio={currentAudio}
               currentTime={currentTime}
+              onAudioLoaded={setCurrentAudio}
               onSeek={(t) => setSeekTime(t)}
               onSaveCompleted={() => setRefreshDbTrigger(t => t + 1)}
               sttTriggerItem={sttTriggerItem}
